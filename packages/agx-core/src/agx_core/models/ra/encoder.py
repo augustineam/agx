@@ -8,7 +8,7 @@ from .base import BaseEncoder
 from .layers import *
 
 
-@keras.saving.register_keras_serializable(package="agnostix_core.models.ra")
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
 class Encoder(BaseEncoder):
     """Encoder mapping images to latent mean and log-variance parameters.
 

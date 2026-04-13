@@ -14,4 +14,11 @@ data/
 output/
 .vscode/
 
+# Keep this folder
 !agnostix/core/data
+
+# Image / data extensions
+*.png
+*.jpg
+*.tiff
+*.bmp

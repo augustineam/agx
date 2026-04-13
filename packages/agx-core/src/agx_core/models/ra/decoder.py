@@ -8,7 +8,7 @@ from .base import BaseDecoder
 from .layers import *
 
 
-@keras.saving.register_keras_serializable(package="agnostix_core.models.ra")
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
 class Decoder(BaseDecoder):
     """Decoder mapping latent space representations back to images.
 

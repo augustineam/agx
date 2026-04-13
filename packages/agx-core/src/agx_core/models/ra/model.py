@@ -35,7 +35,7 @@ def embedding_loss(
     return scale * total_loss
 
 
-@keras.saving.register_keras_serializable(package="agnostix_core.models.ra")
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
 class ReversedAutoencoder(Model):
     """Reversed Autoencoder orchestrating adversarial training between encoder and decoder.
 

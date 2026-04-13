@@ -8,7 +8,7 @@ from typing import Dict, Any, Union, Tuple, Sequence, Optional
 _size = Union[int, Tuple[int, int]]
 
 
-@keras.saving.register_keras_serializable(package="agnostix_core.models.ra")
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
 class Split(keras.layers.Layer):
     """Splits an input tensor along a specified axis.
 
@@ -33,7 +33,7 @@ class Split(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable(package="agnostix_core.models.ra")
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
 class ConvBlock(keras.layers.Layer):
     """Fusing Conv2D, LayerNormalization, and optional LeakyReLU.
 
@@ -104,7 +104,7 @@ class ConvBlock(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable(package="agnostix_core.models.ra")
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
 class DeConvBlock(keras.layers.Layer):
     """Fusing Conv2DTranspose, LayerNormalization, and LeakyReLU.
 
@@ -164,7 +164,7 @@ class DeConvBlock(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable(package="agnostix_core.models.ra")
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
 class ResidualBlock(keras.layers.Layer):
     """Residual connection with optional channel expansion and grouped convolution.
 
@@ -221,7 +221,7 @@ class ResidualBlock(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable(package="agnostix_core.models.ra")
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
 class Reparameterization(keras.layers.Layer):
     """Samples from latent space using the reparameterization trick: z = μ + σ * ε.
 
