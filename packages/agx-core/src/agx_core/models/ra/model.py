@@ -36,13 +36,14 @@ def embedding_loss(
 
 
 @keras.saving.register_keras_serializable(package="agx_core.models.ra")
-class ReversedAutoencoder(Model):
+class ReversedAutoencoderBase(Model):
     """Reversed Autoencoder orchestrating adversarial training between encoder and decoder.
 
     The encoder and decoder are instantiated externally and passed to this model.
     """
 
     optimizer: RAOptimizer
+    loss: keras.Loss
 
     def __init__(
         self,
@@ -108,7 +109,7 @@ class ReversedAutoencoder(Model):
         if self.scale is None:
             self.scale = 32 / np.prod(x_shape[1:3]) ** 0.5
 
-        self.built = True
+        super(ReversedAutoencoderBase, self).build(input_shape)
 
     def call(
         self,
@@ -237,7 +238,7 @@ class ReversedAutoencoder(Model):
 
         return loss, aux_outputs, metric_updates
 
-    def train_decoder(
+    def compute_decoder_loss(
         self,
         real: keras.KerasTensor,
         noise: keras.KerasTensor,
@@ -378,8 +379,7 @@ class ReversedAutoencoder(Model):
             Dictionary of metric results
         """
 
-        batch_real, batch_cond, _ = keras.utils.unpack_x_y_sample_weight(data)
-        # batch_real = ops.reshape(batch_real, (-1, *self.input_shape))
+        (batch_real, batch_cond), _ = data
 
         batch_size = ops.shape(batch_real)[0]
         batch_noise = self.encoder.noise(batch_size)
@@ -415,8 +415,7 @@ class ReversedAutoencoder(Model):
         self.encoder.trainable = False
         self.decoder.trainable = False
 
-        real, cond, _ = keras.utils.unpack_x_y_sample_weight(data)
-        # real = ops.reshape(real, (-1, *self.input_shape))
+        (real, cond), _ = data
 
         batch_size = ops.shape(real)[0]
         noise = self.encoder.noise(batch_size)
@@ -510,25 +509,5 @@ class ReversedAutoencoder(Model):
         config["decoder"] = keras.saving.deserialize_keras_object(config.pop("decoder"))
         return cls(**config)
 
-    def build_graph(self, input_shape: Sequence[Sequence[int]]):
-        """Build a Keras functional model for visualization and export.
 
-        Args:
-            input_shape: Shape of input images (without batch dimension)
-
-        Returns:
-            Keras Model instance representing the autoencoder architecture
-        """
-
-        x_shape, c_shape = input_shape
-        x = keras.Input(shape=x_shape, name="image")
-        c = keras.Input(shape=c_shape, name="condition")
-
-        mu, logvar = self.encoder.build_graph([x, c])
-        z = self.reparameterize([mu, logvar])
-        y = self.decoder.build_graph([z, c])
-
-        return keras.Model(inputs=[x, c], outputs=y, name=self.name)
-
-
-__all__ = ["ReversedAutoencoder"]
+__all__ = ["ReversedAutoencoderBase"]

@@ -48,7 +48,7 @@ class Encoder(BaseEncoder):
         image_shape, _ = input_shape
 
         reduction_factor = 2 ** len(self.filters)
-        h, w = image_shape[1], image_shape[2]
+        h, w = image_shape[0], image_shape[1]
 
         if h is not None and w is not None:
             resolution = (h // reduction_factor, w // reduction_factor)
@@ -65,14 +65,11 @@ class Encoder(BaseEncoder):
             padding="valid",
         )
 
-        self.built = True
+        super(Encoder, self).build(input_shape)
 
-    def compute_output_shape(self, input_shape: Sequence[Sequence[int]]):
+    def compute_output_shape(self, input_shape: Sequence[int]):
         # Calculate the output shape by passing through all blocks
-        image_shape, _ = input_shape
-
-        mu_shape = (image_shape[0], 1, 1, self.latent_size)
-
+        mu_shape = (input_shape[0], 1, 1, self.latent_size)
         return mu_shape, mu_shape
 
     def call(
@@ -103,17 +100,6 @@ class Encoder(BaseEncoder):
             )
         )
         return config
-
-    def build_graph(self, inputs: Sequence[keras.KerasTensor]):
-        x, c = inputs
-
-        for block in self.blocks:
-            x = block(x)
-
-        x = self.concat([x, c])
-        x = self.conv(x)
-        mean, logvar = self.split(x)
-        return mean, logvar
 
 
 __all__ = ["Encoder"]

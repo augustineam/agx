@@ -90,15 +90,5 @@ class Decoder(BaseDecoder):
         )
         return config
 
-    def build_graph(self, inputs: Sequence[keras.KerasTensor]):
-        x, c = inputs
-        x = self.conv_transpose(x)
-        x = self.lrelu(x)
-        x = self.concat([x, c])
-
-        for block in self.blocks:
-            x = block(x)
-        return keras.activations.sigmoid(x)
-
 
 __all__ = ["Decoder"]

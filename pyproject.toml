@@ -1,0 +1,17 @@
+[project]
+name = "agx"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "agx-torch",
+    "ipykernel>=7.2.0",
+    "ipywidgets>=8.1.8",
+    "nbformat>=5.10.4"
+]
+
+[tool.uv.sources]
+agx-core = { path = "packages/agx-core", editable = true }
+agx-torch = { path = "packages/agx-torch", editable = true }
+agx-tf = { path = "packages/agx-tf", editable = true }

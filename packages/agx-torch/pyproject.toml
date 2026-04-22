@@ -1,5 +1,13 @@
 [project]
-name = "agnostix-torch"
+name = "agx-torch"
 version = "0.1.0"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "agx-core",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+    "ultralytics>=8.4.37",
+]
+
+[tool.uv.sources]
+agx-core = { path = "../../packages/agx-core", editable = true }

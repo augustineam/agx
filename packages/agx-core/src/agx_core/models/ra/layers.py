@@ -204,7 +204,8 @@ class ResidualBlock(keras.layers.Layer):
             if expand
             else keras.layers.Identity()
         )
-        self.built = True
+        
+        super(ResidualBlock, self).build(input_shape)
 
     def call(
         self, x: keras.KerasTensor, training: Optional[bool] = None

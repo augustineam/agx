@@ -24,7 +24,7 @@ A unified, framework-agnostic machine learning architecture built to process X-r
 
 ## Project Structure (The "Library & Runner" Pattern)
 
-* **`agnostix/core/`**: Framework-agnostic logic. Uses `keras>=3.0` and `scikit-learn`. Contains base models, data pipelines, and universal `keras.ops` custom layers.
-* **`agnostix/backends/torch/`**: PyTorch implementation. Uses `torch`, `skorch`, and local `core`. Contains PyTorch-specific wrappers and data loaders.
-* **`agnostix/backends/tf/`**: TensorFlow implementation. Uses `tensorflow`, `scikeras`, and local `core`. Contains TF-specific wrappers and `tf.data` logic.
+* **`packages/agx_core/`**: Framework-agnostic logic. Uses `keras>=3.0` and `scikit-learn`. Contains base models, data pipelines, and universal `keras.ops` custom layers.
+* **`packages/agx_torch/`**: PyTorch implementation. Uses `torch`, `skorch`, and local `core`. Contains PyTorch-specific wrappers and data loaders.
+* **`packages/agx_tf/`**: TensorFlow implementation. Uses `tensorflow`, `scikeras`, and local `core`. Contains TF-specific wrappers and `tf.data` logic.
 * **`notebooks/`**: The "working" environments. Houses isolated Jupyter environments with `uv` virtualenvs pointing to the respective backends, keeping the SageMaker deployment payload clean and tiny.
