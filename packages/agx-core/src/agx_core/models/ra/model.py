@@ -44,6 +44,8 @@ class ReversedAutoencoderBase(Model):
 
     optimizer: RAOptimizer
     loss: keras.Loss
+    encoder: BaseEncoder
+    decoder: BaseDecoder
 
     def __init__(
         self,
@@ -104,6 +106,11 @@ class ReversedAutoencoderBase(Model):
         x_shape, c_shape = input_shape
 
         self.encoder.build([x_shape, c_shape])
+
+        z_shape = (1, 1, self.encoder.latent_size)
+        self.reparameterize.build([z_shape, z_shape])
+
+        self.decoder.build([z_shape, c_shape])
 
         # Calculate dynamic scale if not provided based on spatial dimension
         if self.scale is None:

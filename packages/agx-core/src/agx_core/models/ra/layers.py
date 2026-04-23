@@ -233,6 +233,9 @@ class Reparameterization(keras.layers.Layer):
     def __init__(self, name="reparameterization", **kwargs):
         super().__init__(name=name, **kwargs)
 
+    def build(self, input_shape: Sequence[Sequence[int]]):
+        super(Reparameterization, self).build(input_shape)
+
     def call(self, inputs):
         z_mean, z_log_var = inputs
         eps = keras.random.normal(shape=ops.shape(z_mean))

@@ -65,6 +65,9 @@ class Decoder(BaseDecoder):
             [ResidualBlock(filters[-1]), keras.layers.Conv2D(out_ch, 5, padding="same")]
         )
 
+    def build(self, input_shape: Sequence[Sequence[int]]):
+        super(Decoder, self).build(input_shape)
+
     def call(
         self,
         inputs: Sequence[keras.KerasTensor],
