@@ -22,6 +22,11 @@ class Reparameterization(keras.layers.Layer):
     def build(self, input_shape: Sequence[Sequence[int]]):
         super(Reparameterization, self).build(input_shape)
 
+    def compute_output_shape(
+        self, input_shape: Sequence[Sequence[int]]
+    ) -> Sequence[int]:
+        return input_shape[0]
+
     def call(self, inputs):
         z_mean, z_log_var = inputs
         eps = torch.rand_like(z_mean)

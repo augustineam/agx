@@ -6,6 +6,7 @@ from typing import Sequence, Optional
 
 from .base import BaseEncoder
 from .layers import *
+from .layers import _axis_channel
 
 
 @keras.saving.register_keras_serializable(package="agx_core.models.ra")
@@ -28,7 +29,7 @@ class Encoder(BaseEncoder):
         name: str = "encoder",
         **kwargs,
     ):
-        super().__init__(latent_size=latent_size, name=name, **kwargs)
+        super(Encoder, self).__init__(latent_size=latent_size, name=name, **kwargs)
 
         self.filters = filters
         self.blocks: list[keras.layers.Layer] = [
@@ -41,23 +42,21 @@ class Encoder(BaseEncoder):
 
         self.blocks.append(ResidualBlock(filters[-1]))
         self.conv: keras.layers.Conv2D = None
-        self.concat = keras.layers.Concatenate()
-        self.split = Split(2)
+        self.concat = keras.layers.Concatenate(_axis_channel())
+        self.split = Split(2, axis=_axis_channel())
 
     def build(self, input_shape: Sequence[Sequence[int]]):
-        image_shape, _ = input_shape
+        x_shape, c_shape = input_shape
 
-        reduction_factor = 2 ** len(self.filters)
-        h, w = image_shape[0], image_shape[1]
+        for block in self.blocks:
+            block.build(x_shape)
+            x_shape = block.compute_output_shape(x_shape)
 
-        if h is not None and w is not None:
-            resolution = (h // reduction_factor, w // reduction_factor)
+        if keras.config.image_data_format() == "channels_last":
+            resolution = x_shape[1:3]
         else:
-            # Fallback if shapes are dynamic (None)
-            raise ValueError(
-                "Input spatial dimensions must be defined to compute latent conv kernel size."
-            )
-
+            resolution = x_shape[2:]
+            
         # Map downsampled spatial features directly to 1x1 latent dimensions
         self.conv = keras.layers.Conv2D(
             2 * self.latent_size,
@@ -65,13 +64,15 @@ class Encoder(BaseEncoder):
             padding="valid",
         )
 
+        self.concat.build([x_shape, c_shape])
+        x_shape = self.concat.compute_output_shape([x_shape, c_shape])
+
+        self.conv.build(x_shape)
+        x_shape = self.conv.compute_output_shape(x_shape)
+        self.split.build(x_shape)
+
         super(Encoder, self).build(input_shape)
-
-    def compute_output_shape(self, input_shape: Sequence[int]):
-        # Calculate the output shape by passing through all blocks
-        mu_shape = (input_shape[0], 1, 1, self.latent_size)
-        return mu_shape, mu_shape
-
+    
     def call(
         self,
         inputs: Sequence[keras.KerasTensor],

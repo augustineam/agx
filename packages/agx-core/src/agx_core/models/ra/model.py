@@ -6,7 +6,7 @@ from typing import Sequence, Optional, Dict, Any
 from keras import metrics, Model, ops
 
 from .base import BaseEncoder, BaseDecoder
-from .layers import Reparameterization
+from .layers import Reparameterization, _axis_channel
 from .optimizer import RAOptimizer
 
 
@@ -27,12 +27,19 @@ def embedding_loss(
     total_loss = 0
     scale = 1.0 / len(teacher_embedds)
     for teacher_feature, student_feature in zip(teacher_embedds, student_embedds):
-        mse = keras.losses.mean_squared_error(teacher_feature, student_feature)
+        mse = ops.mean(
+            ops.square(teacher_feature - student_feature), axis=_axis_channel()
+        )
+        # [B, H, W]
         cosine_similarity = keras.losses.cosine_similarity(
-            teacher_feature, student_feature
+            teacher_feature, student_feature, axis=_axis_channel()
         )
         total_loss += ops.mean(0.5 * mse + (1 - cosine_similarity), axis=[1, 2])
     return scale * total_loss
+
+
+def pixel_mse(y_true, y_pred):
+    return ops.mean(ops.square(y_true - y_pred), axis=_axis_channel())
 
 
 @keras.saving.register_keras_serializable(package="agx_core.models.ra")
@@ -43,7 +50,6 @@ class ReversedAutoencoderBase(Model):
     """
 
     optimizer: RAOptimizer
-    loss: keras.Loss
     encoder: BaseEncoder
     decoder: BaseDecoder
 
@@ -51,7 +57,9 @@ class ReversedAutoencoderBase(Model):
         self,
         encoder: BaseEncoder,
         decoder: BaseDecoder,
+        reparameterize=Reparameterization(),
         scale: Optional[float] = None,
+        freeze_backbone: bool = True,
         name: str = "reversed_autoencoder",
         **kwargs,
     ):
@@ -59,8 +67,12 @@ class ReversedAutoencoderBase(Model):
 
         self.encoder = encoder
         self.decoder = decoder
+        self.reparameterize = reparameterize
+        self.freeze_backbone = freeze_backbone
 
-        self.reparameterize = Reparameterization()
+        # Turn-taking flags — controlled by AdversarialEquilibriumCallback
+        self.train_encoder_enable = True
+        self.train_decoder_enable = True
 
         # Adaptive scaling factor to maintain consistent gradient energy across image resolutions
         self.scale = scale
@@ -105,18 +117,31 @@ class ReversedAutoencoderBase(Model):
     def build(self, input_shape: Sequence[Sequence[int]]):
         x_shape, c_shape = input_shape
 
-        self.encoder.build([x_shape, c_shape])
-
-        z_shape = (1, 1, self.encoder.latent_size)
-        self.reparameterize.build([z_shape, z_shape])
-
-        self.decoder.build([z_shape, c_shape])
-
         # Calculate dynamic scale if not provided based on spatial dimension
         if self.scale is None:
-            self.scale = 32 / np.prod(x_shape[1:3]) ** 0.5
+            if keras.config.image_data_format() == "channels_last":
+                spatial = x_shape[1:3]  # H, W
+            else:
+                spatial = x_shape[2:]  # H, W
+
+            self.scale = 32 / np.prod(spatial) ** 0.5
+
+        self.encoder.build([x_shape, c_shape])
+
+        x_shape = self.encoder.compute_output_shape([x_shape, c_shape])
+
+        self.reparameterize.build(x_shape)
+        x_shape = self.reparameterize.compute_output_shape(x_shape)
+
+        self.decoder.build([x_shape, c_shape])
 
         super(ReversedAutoencoderBase, self).build(input_shape)
+
+    def compile(self, optimizer: keras.Optimizer, **kwargs):
+        super(ReversedAutoencoderBase, self).compile(optimizer, **kwargs)
+        if isinstance(optimizer, RAOptimizer):
+            self.optimizer.enc.build(self.encoder.trainable_variables)
+            self.optimizer.dec.build(self.decoder.trainable_variables)
 
     def call(
         self,
@@ -150,7 +175,7 @@ class ReversedAutoencoderBase(Model):
         rec_real = self.decoder([z_real, condition], training=False)
 
         # Get the latent representations, embeddings and reconstructions for reconstructed samples
-        (mean_rec, logvar_rec), embeds_rec = self.encoder(
+        (mean_rec, logvar_rec), _ = self.encoder(
             [ops.stop_gradient(rec_real), condition], training=True
         )
         z_rec = self.reparameterize([mean_rec, logvar_rec])
@@ -163,19 +188,11 @@ class ReversedAutoencoderBase(Model):
         z_fake = self.reparameterize([mean_fake, logvar_fake])
         rec_fake = self.decoder([z_fake, condition], training=False)
 
-        # The embedding loss is to make sure that the embeddings of the real
-        # samples and the reconstructed samples are close to each other,
-        # which means that the features of the real samples and the reconstructed
-        # samples are close to each other.
-
-        # [N]
-        embed_loss = self.scale * embedding_loss(embeds_real, embeds_rec)
-
         # For real samples, we want to maximize the ELBO by minimizing the negative
         # ELBO for the real samples `elbo_real`.
 
         # [N], [N], [N], [N], [N]
-        logpx_z_real = -self.scale * ops.sum(self.loss(real, rec_real), axis=[1, 2])
+        logpx_z_real = -self.scale * ops.sum(pixel_mse(real, rec_real), axis=[1, 2])
         logpz_real = log_normal_pdf(z_real, 0.0, 0.0, axis=[1, 2, 3])
         logqz_x_real = log_normal_pdf(z_real, mean_real, logvar_real, axis=[1, 2, 3])
         kld_real = self.scale * (logqz_x_real - logpz_real)
@@ -188,7 +205,7 @@ class ReversedAutoencoderBase(Model):
 
         # [N], [N], [N], [N]
         logpx_z_rec = -self.scale * ops.sum(
-            self.loss(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
+            pixel_mse(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
         )
         logpz_rec = log_normal_pdf(z_rec, 0.0, 0.0, axis=[1, 2, 3])
         logqz_x_rec = log_normal_pdf(z_rec, mean_rec, logvar_rec, axis=[1, 2, 3])
@@ -197,7 +214,7 @@ class ReversedAutoencoderBase(Model):
 
         # [N], [N], [N], [N]
         logpx_z_fake = -self.scale * ops.sum(
-            self.loss(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
+            pixel_mse(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
         )
         logpz_fake = log_normal_pdf(z_fake, 0.0, 0.0, axis=[1, 2, 3])
         logqz_x_fake = log_normal_pdf(z_fake, mean_fake, logvar_fake, axis=[1, 2, 3])
@@ -217,20 +234,29 @@ class ReversedAutoencoderBase(Model):
         expelbo_rec = -elbo_rec * ops.exp(self.scale * elbo_rec)
         expelbo_fake = -elbo_fake * ops.exp(self.scale * elbo_fake)
 
-        loss = ops.mean(-elbo_real + 0.5 * (expelbo_rec + expelbo_fake) + embed_loss)
+        loss = ops.mean(-elbo_real + 0.5 * (expelbo_rec + expelbo_fake))
 
-        # Keep track of the KL divergence between the real and fake samples
-        # to see who's winning the game between the encoder and decoder.
-        # Encoder is winning when real KLD < fake KLD
-        # Decoder is winning when real KLD >= fake KLD
-        # In order to generate realistic samples, the decoder should move this
-        # difference close to zero.
+        # Track KLD gap between fake and real samples as an adversarial
+        # equilibrium diagnostic:
+        #   diff_kld = kld_fake - kld_real
+        #
+        #   > 0 (large): Encoder dominates — fakes need far more specialized
+        #                encodings than reals. Decoder is underperforming.
+        #   > 0 (small): Approaching equilibrium — decoder produces fakes
+        #                that are nearly as "normal" as reals to the encoder.
+        #   ≈ 0:         Nash equilibrium — encoder cannot distinguish fakes
+        #                from reals via KLD alone. Decoder has succeeded.
+        #   < 0:         Pathological — encoder finds fakes more normal than
+        #                reals. Indicates training instability.
 
-        aux_outputs = (z_real, embeds_real, kld_real)
+        aux_outputs = (
+            ops.stop_gradient(z_real),
+            [ops.stop_gradient(embed) for embed in embeds_real],
+            ops.stop_gradient(kld_real),
+        )
 
         metric_updates = dict(
             loss_enc=loss,
-            loss_embed=embed_loss,
             loss_rec=-logpx_z_real,
             kld_real=kld_real,
             kld_rec=kld_rec,
@@ -285,20 +311,33 @@ class ReversedAutoencoderBase(Model):
         z_fake = self.reparameterize([mean_fake, logvar_fake])
         rec_fake = self.decoder([ops.stop_gradient(z_fake), condition], training=True)
 
+        # Embedding loss (decoder only): measures feature consistency between
+        # E(I) and E(I') in the encoder's native feature space.
+        #
+        # The encoder acts as a frozen perceptual critic — its intermediate
+        # features define the space where we measure reconstruction fidelity.
+        # By training only the decoder with this signal, we preserve the
+        # encoder's anomaly sensitivity: it remains free to produce divergent
+        # embeddings for anomalous inputs, while the decoder is pushed to
+        # always reconstruct "healthy" images that re-encode faithfully.
+        #
+        # At inference, anomaly score = distance(E(I), E(I')), which is
+        # high precisely because the encoder was never trained to suppress
+        # that difference.
         # [N]
         embeds_real = [ops.stop_gradient(embed) for embed in embeds_real]
-        embed_loss = self.scale * embedding_loss(embeds_real, embeds_rec)
+        embed_loss = embedding_loss(embeds_real, embeds_rec) / (self.scale**2)
 
         # Here we want to maximize the ELBOs for the real and fake samples,
         # to guide the decoder to generate realistic samples.
 
         # [N], [N]
-        logpx_z_real = -self.scale * ops.sum(self.loss(real, rec_real), axis=[1, 2])
+        logpx_z_real = -self.scale * ops.sum(pixel_mse(real, rec_real), axis=[1, 2])
         elbo_real = logpx_z_real - ops.stop_gradient(kld_real)
 
         # [N], [N], [N], [N], [N]
         logpx_z_rec = -self.scale * ops.sum(
-            self.loss(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
+            pixel_mse(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
         )
         logpz_rec = log_normal_pdf(z_rec, 0.0, 0.0, axis=[1, 2, 3])
         logqz_x_rec = log_normal_pdf(z_rec, mean_rec, logvar_rec, axis=[1, 2, 3])
@@ -307,7 +346,7 @@ class ReversedAutoencoderBase(Model):
 
         # [N], [N], [N], [N], [N]
         logpx_z_fake = -self.scale * ops.sum(
-            self.loss(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
+            pixel_mse(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
         )
         logpz_fake = log_normal_pdf(z_fake, 0.0, 0.0, axis=[1, 2, 3])
         logqz_x_fake = log_normal_pdf(z_fake, mean_fake, logvar_fake, axis=[1, 2, 3])
@@ -316,7 +355,7 @@ class ReversedAutoencoderBase(Model):
 
         loss = ops.mean(-elbo_real - 0.5 * (elbo_rec + elbo_fake) + embed_loss)
 
-        return loss, dict(loss_dec=loss)
+        return loss, dict(loss_dec=loss, loss_embed=embed_loss)
 
     def train_encoder(
         self,
@@ -450,10 +489,10 @@ class ReversedAutoencoderBase(Model):
         rec_fake = self.decoder([z_fake, cond], training=False)
 
         # Compute embedding loss between the real and reconstructed samples
-        loss_embed = self.scale * embedding_loss(embeds_real, embeds_rec)
+        loss_embed = embedding_loss(embeds_real, embeds_rec) / (self.scale**2)
 
         # [N], [N], [N], [N], [N]
-        logpx_z_real = -self.scale * ops.sum(self.loss(real, rec_real), axis=[1, 2])
+        logpx_z_real = -self.scale * ops.sum(pixel_mse(real, rec_real), axis=[1, 2])
         logpz_real = log_normal_pdf(z_real, 0.0, 0.0, axis=[1, 2, 3])
         logqz_x_real = log_normal_pdf(z_real, mean_real, logvar_real, axis=[1, 2, 3])
         kld_real = self.scale * (logqz_x_real - logpz_real)
@@ -461,7 +500,7 @@ class ReversedAutoencoderBase(Model):
 
         # [N], [N], [N], [N], [N]
         logpx_z_rec = -self.scale * ops.sum(
-            self.loss(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
+            pixel_mse(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
         )
         logpz_rec = log_normal_pdf(z_rec, 0.0, 0.0, axis=[1, 2, 3])
         logqz_x_rec = log_normal_pdf(z_rec, mean_rec, logvar_rec, axis=[1, 2, 3])
@@ -470,7 +509,7 @@ class ReversedAutoencoderBase(Model):
 
         # [N], [N], [N], [N], [N]
         logpx_z_fake = -self.scale * ops.sum(
-            self.loss(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
+            pixel_mse(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
         )
         logpz_fake = log_normal_pdf(z_fake, 0.0, 0.0, axis=[1, 2, 3])
         logqz_x_fake = log_normal_pdf(z_fake, mean_fake, logvar_fake, axis=[1, 2, 3])
@@ -505,6 +544,7 @@ class ReversedAutoencoderBase(Model):
             dict(
                 encoder=keras.saving.serialize_keras_object(self.encoder),
                 decoder=keras.saving.serialize_keras_object(self.decoder),
+                reparameterize=keras.saving.serialize_keras_object(self.reparameterize),
                 scale=self.scale,
             )
         )

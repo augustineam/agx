@@ -17,7 +17,20 @@ class BaseEncoder(keras.layers.Layer, ABC):
         return self._latent_size
 
     def noise(self, batch_size) -> keras.KerasTensor:
-        return keras.random.normal((batch_size, 1, 1, self.latent_size))
+        if keras.config.image_data_format() == "channels_last":
+            return keras.random.normal((batch_size, 1, 1, self.latent_size))
+        return keras.random.normal((batch_size, self.latent_size, 1, 1)) 
+
+    def compute_output_shape(self, input_shape: Sequence[Sequence[int]]):
+        # Calculate the output shape by passing through all blocks
+        batch_size = input_shape[0][0]
+
+        if keras.config.image_data_format() == "channels_last":
+            mu_shape = (batch_size, 1, 1, self.latent_size)
+        else:
+            mu_shape = (batch_size, self.latent_size, 1, 1)
+
+        return mu_shape, mu_shape
 
     @abstractmethod
     def call(

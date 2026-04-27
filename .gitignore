@@ -22,3 +22,8 @@ output/
 *.jpg
 *.tiff
 *.bmp
+
+# Models extensions
+*.onnx
+*.onnx.data
+*.keras
