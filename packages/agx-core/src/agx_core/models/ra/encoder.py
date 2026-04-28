@@ -26,13 +26,10 @@ class ResNetEncoder(BaseEncoder):
     def __init__(
         self,
         filters: Sequence[int] = [64, 128, 256, 512, 512, 512],
-        latent_size: int = 512,
-        name: str = "encoder",
+        name: str = "resnet_encoder",
         **kwargs,
     ):
-        super(ResNetEncoder, self).__init__(
-            latent_size=latent_size, name=name, **kwargs
-        )
+        super(ResNetEncoder, self).__init__(name=name, **kwargs)
 
         self.filters = filters
         self.blocks: list[keras.layers.Layer] = [
@@ -96,14 +93,13 @@ class ResNetEncoder(BaseEncoder):
         return (mean, logvar), embeddings
 
     def get_config(self):
-        config = super().get_config()
-        config.update(
-            dict(
-                latent_size=self.latent_size,
-                filters=self.filters,
-            )
-        )
+        config = super(ResNetEncoder, self).get_config()
+        config.update(dict(filters=self.filters))
         return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
 
 
 @keras.saving.register_keras_serializable(package="agx_core.models.ra")
@@ -111,12 +107,11 @@ class Encoder(BaseEncoder):
 
     def __init__(
         self,
-        latent_size: int,
         backbone: Sequence[keras.layers.Layer],
-        name="mbnetv3",
+        name="mbnetv3_encoder",
         **kwargs,
     ):
-        super(Encoder, self).__init__(latent_size, name=name, **kwargs)
+        super(Encoder, self).__init__(name=name, **kwargs)
 
         self.backbone = backbone
         self.gray2rgb = Sequential(
@@ -129,7 +124,7 @@ class Encoder(BaseEncoder):
             ]
         )
         self.concat = keras.layers.Concatenate(_axis_channel())
-        self.to_latent = keras.layers.Conv2D(latent_size * 2, 1)
+        self.to_latent = keras.layers.Conv2D(self.latent_size * 2, 1)
         self.split = Split(2, axis=_axis_channel())
 
     def build(self, input_shape: Sequence[Sequence[int]]):
@@ -189,11 +184,11 @@ class Encoder(BaseEncoder):
         return (mean, logvar), embeddings
 
     def get_config(self):
-        config = super().get_config()
-        backbone_cfg = [
+        config = super(Encoder, self).get_config()
+        backbone = [
             keras.saving.serialize_keras_object(layer) for layer in self.backbone
         ]
-        config.update(dict(backbone=backbone_cfg))
+        config.update(dict(backbone=backbone))
         return config
 
     @classmethod
@@ -201,7 +196,7 @@ class Encoder(BaseEncoder):
         backbone = [
             keras.saving.deserialize_keras_object(cfg) for cfg in config.pop("backbone")
         ]
-        return cls(backbone=backbone, **config)
+        return cls(backbone, **config)
 
 
 __all__ = ["Encoder", "ResNetEncoder"]

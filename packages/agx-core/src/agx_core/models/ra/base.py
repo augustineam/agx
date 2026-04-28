@@ -6,11 +6,17 @@ from abc import ABC, abstractmethod
 from typing import Sequence, Tuple, List, Optional
 
 
+def _default_target_shape():
+    if keras.config.image_data_format() == "channels_last":
+        return (224, 224, 1)
+    return (1, 224, 224)
+
+
 class BaseEncoder(keras.layers.Layer, ABC):
 
     def __init__(
         self,
-        latent_size: int,
+        latent_size: int = 512,
         latent_spatial_res: Optional[Tuple[int]] = None,
         name="base_encoder",
         **kwargs,
@@ -68,12 +74,30 @@ class BaseEncoder(keras.layers.Layer, ABC):
         """
         pass
 
+    def get_config(self):
+        config = super(BaseEncoder, self).get_config()
+        config.update(
+            dict(
+                latent_size=self.latent_size, latent_spatial_res=self.latent_spatial_res
+            )
+        )
+        return config
+
 
 class BaseDecoder(keras.layers.Layer):
 
-    def __init__(self, target_shape: Sequence[int], name="base_decoder", **kwargs):
-        self.target_shape = target_shape
+    def __init__(
+        self,
+        target_shape: Sequence[int] = _default_target_shape(),
+        name="base_decoder",
+        **kwargs,
+    ):
         super(BaseDecoder, self).__init__(name=name, **kwargs)
+        
+        if target_shape is None or len(target_shape) != 3:
+            raise ValueError("target_shape must be (H, W, C) or (C, H, W)")
+
+        self.target_shape = target_shape
 
     @abstractmethod
     def call(
@@ -85,6 +109,11 @@ class BaseDecoder(keras.layers.Layer):
         Outputs: reconstructed_image
         """
         pass
+
+    def get_config(self):
+        config = super(BaseDecoder, self).get_config()
+        config.update(dict(target_shape=self.target_shape))
+        return config
 
 
 __all__ = [

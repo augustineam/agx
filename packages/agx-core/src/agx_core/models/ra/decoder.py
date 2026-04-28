@@ -5,15 +5,9 @@ import keras
 from typing import Sequence, Optional
 
 from .base import BaseDecoder
-from .layers import _axis_channel, _layer_norm_axis
+from .layers import _axis_channel
 from .layers import *
 from ._spatial import *
-
-
-def _default_shape():
-    if keras.config.image_data_format() == "channels_last":
-        return (224, 224, 1)
-    return (1, 224, 224)
 
 
 @keras.saving.register_keras_serializable(package="agx_core.models.ra")
@@ -44,15 +38,23 @@ class DecoderStage(keras.layers.Layer):
         kernel_size: int = 3,
         se_ratio: float = 0.25,
         upsample: bool = True,
+        dropout_rate: float = 0.0,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super(DecoderStage, self).__init__(**kwargs)
         self.filters = filters
         self.num_blocks = num_blocks
         self.expand_ratio = expand_ratio
         self.kernel_size = kernel_size
         self.se_ratio = se_ratio
         self._upsample = upsample
+        self.dropout_rate = dropout_rate
+
+        # SpatialDropout at stage entry — drops entire channels,
+        # not individual pixels. Forces diverse feature usage.
+        self.dropout = (
+            keras.layers.SpatialDropout2D(dropout_rate) if dropout_rate > 0 else None
+        )
 
         # self.film = FiLM()
         self.blocks = [
@@ -98,6 +100,8 @@ class DecoderStage(keras.layers.Layer):
     def call(self, x, training=None):
         # x, cond = inputs
         # x = self.film([x, cond])
+        if self.dropout is not None:
+            x = self.dropout(x, training=training)
         for block in self.blocks:
             x = block(x, training=training)
         x = self.up(x, training=training)
@@ -113,6 +117,7 @@ class DecoderStage(keras.layers.Layer):
                 "kernel_size": self.kernel_size,
                 "se_ratio": self.se_ratio,
                 "upsample": self._upsample,
+                "dropout_rate": self.dropout_rate,
             }
         )
         return config
@@ -151,32 +156,64 @@ class Decoder(BaseDecoder):
 
     # Sensible defaults matching MobileNetV3 Small's depth profile
     DEFAULT_STAGE_CONFIG = [
-        {"filters": 256, "num_blocks": 1, "expand_ratio": 3.0, "kernel_size": 5},
-        {"filters": 96, "num_blocks": 3, "expand_ratio": 3.0, "kernel_size": 5},
-        {"filters": 48, "num_blocks": 2, "expand_ratio": 2.0, "kernel_size": 3},
-        {"filters": 40, "num_blocks": 3, "expand_ratio": 2.0, "kernel_size": 3},
-        {"filters": 24, "num_blocks": 2, "expand_ratio": 2.0, "kernel_size": 3},
-        {"filters": 16, "num_blocks": 1, "expand_ratio": 1.0, "kernel_size": 3},
+        {
+            "filters": 256,
+            "num_blocks": 1,
+            "expand_ratio": 2.0,
+            "kernel_size": 5,
+            "dropout_rate": 0.2,
+        },
+        {
+            "filters": 96,
+            "num_blocks": 3,
+            "expand_ratio": 2.0,
+            "kernel_size": 5,
+            "dropout_rate": 0.2,
+        },
+        {
+            "filters": 48,
+            "num_blocks": 2,
+            "expand_ratio": 1.5,
+            "kernel_size": 3,
+            "dropout_rate": 0.1,
+        },
+        {
+            "filters": 40,
+            "num_blocks": 3,
+            "expand_ratio": 1.5,
+            "kernel_size": 3,
+            "dropout_rate": 0.1,
+        },
+        {
+            "filters": 24,
+            "num_blocks": 2,
+            "expand_ratio": 1.5,
+            "kernel_size": 3,
+            "dropout_rate": 0.05,
+        },
+        {
+            "filters": 16,
+            "num_blocks": 1,
+            "expand_ratio": 1.0,
+            "kernel_size": 3,
+            "dropout_rate": 0.0,
+        },
     ]
 
     def __init__(
         self,
         stage_config: Optional[list[dict]] = None,
-        target_shape: Sequence[int] = _default_shape(),
         output_activation: str = "tanh",
-        name: str = "decoder",
+        name: str = "mbnetv3_decoder",
         **kwargs,
     ):
-        if target_shape is None or len(target_shape) != 3:
-            raise ValueError("target_shape must be (H, W, C) or (C, H, W)")
-
-        super(Decoder, self).__init__(target_shape=target_shape, name=name, **kwargs)
+        super(Decoder, self).__init__(name=name, **kwargs)
 
         self.stage_config = stage_config or self.DEFAULT_STAGE_CONFIG
         self.output_activation = output_activation
 
         ch_dim = 0 if keras.config.image_data_format() == "channels_first" else -1
-        out_ch = target_shape[ch_dim]
+        out_ch = self.target_shape[ch_dim]
 
         self.concat = keras.layers.Concatenate(_axis_channel())
         # # --- Stem: channel expansion only (spatial already 7×7) ---
@@ -263,15 +300,18 @@ class Decoder(BaseDecoder):
         return self.activation(x)
 
     def get_config(self):
-        config = super().get_config()
+        config = super(Decoder, self).get_config()
         config.update(
             {
                 "stage_config": self.stage_config,
-                "target_shape": self.target_shape,
                 "output_activation": self.output_activation,
             }
         )
         return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
 
 
 @keras.saving.register_keras_serializable(package="agx_core.models.ra")
@@ -290,31 +330,22 @@ class ResNetDecoder(BaseDecoder):
     def __init__(
         self,
         filters: Sequence[int] = [512, 512, 512, 256, 128, 64],
-        target_shape: Sequence[int] = _default_shape(),
         output_activation: str = "tanh",
-        name: str = "decoder",
+        name: str = "resnet_decoder",
         **kwargs,
     ):
-        if target_shape is None:
-            raise ValueError("target_shape must be provided")
-
-        if len(target_shape) != 3:
-            raise ValueError(
-                "target_shape must be a sequence of length 3 (height, width, channels)"
-            )
-
-        super().__init__(target_shape=target_shape, name=name, **kwargs)
+        super(ResNetDecoder, self).__init__(name=name, **kwargs)
 
         ch_dim = 0 if keras.config.image_data_format() == "channels_first" else -1
-        out_ch = target_shape[ch_dim]
+        out_ch = self.target_shape[ch_dim]
         self.filters = filters
         self.output_activation = output_activation
 
         # Compute the exact spatial trajectory the encoder would produce
         if keras.config.image_data_format() == "channels_last":
-            h, w = target_shape[:2]
+            h, w = self.target_shape[:2]
         else:
-            h, w = target_shape[1:]
+            h, w = self.target_shape[1:]
 
         trajectory = compute_spatial_trajectory(h, w, len(filters))
         output_paddings = compute_output_paddings(trajectory)
@@ -388,15 +419,18 @@ class ResNetDecoder(BaseDecoder):
         return self.activation(x)
 
     def get_config(self):
-        config = super().get_config()
+        config = super(ResNetDecoder, self).get_config()
         config.update(
             dict(
                 filters=self.filters,
-                target_shape=self.target_shape,
                 output_activation=self.output_activation,
             )
         )
         return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
 
 
 __all__ = ["Decoder", "ResNetDecoder"]

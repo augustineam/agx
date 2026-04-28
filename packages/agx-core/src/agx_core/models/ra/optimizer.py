@@ -3,6 +3,7 @@ import warnings
 
 from typing import Any
 
+
 def _flatten_optimizer_config(optimizer_config: dict[str, Any], prefix: str) -> dict:
     """Flatten optimizer configuration for MLflow tracking."""
     flattened = {}
@@ -46,7 +47,7 @@ def _unflatten_optimizer_config(flattened_config: dict[str, Any], prefix: str) -
     return optimizer_config
 
 
-@keras.saving.register_keras_serializable(package="kssaiml.models.reversed_autoencoder")
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
 class RAOptimizer(keras.optimizers.Optimizer):
     """A custom optimizer wrapper for Reversed Autoencoder training.
 
@@ -95,8 +96,16 @@ class RAOptimizer(keras.optimizers.Optimizer):
         # This function is called when the optimizer is being loaded from a state file,
         # and before load_own_variables is called.
 
-        enc_vars = [var for var in var_list if var.path.startswith("reversed_autoencoder/encoder")]
-        dec_vars = [var for var in var_list if var.path.startswith("reversed_autoencoder/decoder")]
+        enc_vars = [
+            var
+            for var in var_list
+            if var.path.startswith("reversed_autoencoder/encoder")
+        ]
+        dec_vars = [
+            var
+            for var in var_list
+            if var.path.startswith("reversed_autoencoder/decoder")
+        ]
 
         self._enc_optimizer.build(enc_vars)
         self._dec_optimizer.build(dec_vars)

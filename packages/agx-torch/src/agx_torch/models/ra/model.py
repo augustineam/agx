@@ -5,7 +5,7 @@ os.environ["KERAS_BACKEND"] = "torch"
 import keras
 import torch
 
-from typing import Optional
+from typing import Dict, Any
 
 from agx_core.models.ra.base import BaseEncoder, BaseDecoder
 from .layers import Reparameterization
@@ -23,12 +23,22 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
         self,
         encoder: BaseEncoder,
         decoder: BaseDecoder,
-        scale: Optional[float] = None,
+        reparameterize=Reparameterization(),
+        beta_kld: float = 0.25,
+        expelbo_temp: float = 1.0,
+        lambda_embed: float = 1.0,
         name: str = "reversed_autoencoder",
         **kwargs,
     ):
         super(ReversedAutoencoder, self).__init__(
-            encoder, decoder, Reparameterization(), scale=scale, name=name, **kwargs
+            encoder,
+            decoder,
+            reparameterize,
+            beta_kld=beta_kld,
+            expelbo_temp=expelbo_temp,
+            lambda_embed=lambda_embed,
+            name=name,
+            **kwargs,
         )
 
     def train_encoder(self, real, noise, condition):
@@ -93,3 +103,13 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
                     real, noise, condition, z_real, embeds_real, kld_real
                 )
             self.update_step_metrics(metric_updates)
+            
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]):
+        print(config)
+        encoder = keras.saving.deserialize_keras_object(config.pop("encoder"))
+        decoder = keras.saving.deserialize_keras_object(config.pop("decoder"))
+        reparameterize = keras.saving.deserialize_keras_object(
+            config.pop("reparameterize")
+        )
+        return cls(encoder, decoder, reparameterize, **config)
