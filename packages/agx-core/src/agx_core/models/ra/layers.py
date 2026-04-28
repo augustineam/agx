@@ -29,9 +29,7 @@ class Split(keras.layers.Layer):
         axis: Axis to split along (default: -1 if 'channels_last', 1 otherwise).
     """
 
-    def __init__(
-        self, num_or_size_splits, axis=-1, name="split", **kwargs
-    ):
+    def __init__(self, num_or_size_splits, axis=-1, name="split", **kwargs):
         super().__init__(name=name, **kwargs)
         self.num_or_size_splits = num_or_size_splits
         self.axis = axis
@@ -329,10 +327,294 @@ class Reparameterization(keras.layers.Layer):
         return input_shape[0]
 
 
+# ... existing imports and helpers ...
+
+
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
+class SqueezeExcite(keras.layers.Layer):
+    """Squeeze-and-Excite channel attention.
+
+    Global pool → reduce → expand → sigmoid gate.
+
+    Args:
+        se_ratio: Reduction ratio relative to input channels.
+    """
+
+    def __init__(self, se_ratio: float = 0.25, **kwargs):
+        super().__init__(**kwargs)
+        self.se_ratio = se_ratio
+
+    def build(self, input_shape):
+        ch = input_shape[_axis_channel()]
+        se_ch = max(1, int(ch * self.se_ratio))
+
+        self.pool = keras.layers.GlobalAveragePooling2D(keepdims=True)
+        self.reduce = keras.layers.Conv2D(se_ch, 1, activation="relu")
+        self.expand = keras.layers.Conv2D(ch, 1, activation="sigmoid")
+
+        self.pool.build(input_shape)
+        x_shape = self.pool.compute_output_shape(input_shape)
+        self.reduce.build(x_shape)
+        x_shape = self.reduce.compute_output_shape(x_shape)
+        self.expand.build(x_shape)
+
+        super().build(input_shape)
+
+    def call(self, x, training=None):
+        scale = self.pool(x)
+        scale = self.reduce(scale)
+        scale = self.expand(scale)
+        return x * scale
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"se_ratio": self.se_ratio})
+        return config
+
+
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
+class InvertedResidualBlock(keras.layers.Layer):
+    """MobileNetV3-style inverted residual block.
+
+    expand (1×1) → depthwise (k×k) → SE → project (1×1) → + residual
+
+    Uses depthwise separable convolutions for parameter efficiency
+    and squeeze-and-excite for channel attention. Significantly more
+    expressive per parameter than standard Conv+ResBlock.
+
+    Args:
+        filters: Output channels (projection size).
+        expand_ratio: Expansion ratio for intermediate channels.
+        kernel_size: Depthwise convolution kernel size.
+        se_ratio: Squeeze-and-excite reduction ratio (0 to disable).
+        activation: Activation type ('relu6' or 'hard_swish').
+    """
+
+    def __init__(
+        self,
+        filters: int,
+        expand_ratio: float = 4.0,
+        kernel_size: int = 3,
+        se_ratio: float = 0.25,
+        activation: str = "relu6",
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.filters = filters
+        self.expand_ratio = expand_ratio
+        self.kernel_size = kernel_size
+        self.se_ratio = se_ratio
+        self._activation = activation
+
+    def build(self, input_shape):
+        in_ch = input_shape[_axis_channel()]
+        mid_ch = int(in_ch * self.expand_ratio)
+        norm_axis = _layer_norm_axis()
+
+        # Expand: in_ch → mid_ch
+        self.expand_conv = keras.layers.Conv2D(mid_ch, 1, use_bias=False)
+        self.expand_norm = keras.layers.LayerNormalization(axis=norm_axis)
+        self.expand_act = keras.layers.Activation(self._activation)
+        self.expand_conv.build(input_shape)
+        x_shape = self.expand_conv.compute_output_shape(input_shape)
+        self.expand_norm.build(x_shape)
+
+        # Depthwise: mid_ch → mid_ch (same channels, same spatial with padding="same")
+        self.dw_conv = keras.layers.DepthwiseConv2D(
+            self.kernel_size, padding="same", use_bias=False
+        )
+        self.dw_norm = keras.layers.LayerNormalization(axis=norm_axis)
+        self.dw_act = keras.layers.Activation(self._activation)
+        self.dw_conv.build(x_shape)
+        x_shape = self.dw_conv.compute_output_shape(x_shape)
+        self.dw_norm.build(x_shape)
+
+        # Squeeze-and-Excite
+        if self.se_ratio > 0:
+            self.se = SqueezeExcite(self.se_ratio)
+            self.se.build(x_shape)
+            x_shape = self.se.compute_output_shape(x_shape)
+        else:
+            self.se = None
+
+        # Project: mid_ch → filters (no activation — linear projection)
+        self.project_conv = keras.layers.Conv2D(self.filters, 1, use_bias=False)
+        self.project_norm = keras.layers.LayerNormalization(axis=norm_axis)
+        self.project_conv.build(x_shape)
+        x_shape = self.project_conv.compute_output_shape(x_shape)
+        self.project_norm.build(x_shape)
+        
+        # Residual shortcut
+        self.use_residual = in_ch == self.filters
+        if self.use_residual:
+            self.shortcut = None
+        else:
+            self.shortcut = keras.layers.Conv2D(self.filters, 1, use_bias=False)
+            self.shortcut.build(input_shape)
+
+        super(InvertedResidualBlock, self).build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        shape = list(input_shape)
+        shape[_axis_channel()] = self.filters
+        return tuple(shape)
+
+    def call(self, x, training=None):
+        residual = x
+
+        # Expand → Depthwise → SE → Project
+        out = self.expand_act(self.expand_norm(self.expand_conv(x), training=training))
+        out = self.dw_act(self.dw_norm(self.dw_conv(out), training=training))
+        if self.se is not None:
+            out = self.se(out, training=training)
+        out = self.project_norm(self.project_conv(out), training=training)
+
+        # Residual connection
+        if self.use_residual:
+            out = out + residual
+        elif self.shortcut is not None:
+            out = out + self.shortcut(residual)
+
+        return out
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "filters": self.filters,
+                "expand_ratio": self.expand_ratio,
+                "kernel_size": self.kernel_size,
+                "se_ratio": self.se_ratio,
+                "activation": self._activation,
+            }
+        )
+        return config
+
+
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
+class UpsampleRefine(keras.layers.Layer):
+    """Bilinear 2× upsample + Conv refinement.
+
+    Replaces ConvTranspose upsampling to eliminate checkerboard artifacts.
+    Bilinear provides smooth spatial expansion; the conv learns to refine
+    and adjust channels.
+
+    Args:
+        filters: Output channels after refinement.
+        kernel_size: Refinement conv kernel size.
+    """
+
+    def __init__(self, filters: int, kernel_size: int = 3, **kwargs):
+        super().__init__(**kwargs)
+        self.filters = filters
+        self.kernel_size = kernel_size
+
+        self.upsample = keras.layers.UpSampling2D(size=2, interpolation="bilinear")
+        self.conv = keras.layers.Conv2D(
+            filters, kernel_size, padding="same", use_bias=False
+        )
+        self.norm = keras.layers.LayerNormalization(axis=_layer_norm_axis())
+        self.act = keras.layers.Activation("relu6")
+
+    def build(self, input_shape):
+        up_shape = self.upsample.compute_output_shape(input_shape)
+        self.conv.build(up_shape)
+        conv_shape = self.conv.compute_output_shape(up_shape)
+        self.norm.build(conv_shape)
+        super().build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        shape = list(input_shape)
+        if keras.config.image_data_format() == "channels_last":
+            shape[1] *= 2
+            shape[2] *= 2
+            shape[3] = self.filters
+        else:
+            shape[2] *= 2
+            shape[3] *= 2
+            shape[1] = self.filters
+        return tuple(shape)
+
+    def call(self, x, training=None):
+        x = self.upsample(x)
+        x = self.conv(x)
+        x = self.norm(x, training=training)
+        return self.act(x)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"filters": self.filters, "kernel_size": self.kernel_size})
+        return config
+
+
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
+class FiLM(keras.layers.Layer):
+    """Feature-wise Linear Modulation for conditioning.
+
+    Replaces concatenation-based conditioning. Applies per-channel
+    affine transformation conditioned on an external vector:
+
+        output = features * (1 + γ) + β
+
+    where γ, β are predicted from the conditioning vector.
+    Initializes to identity transform (γ=0, β=0).
+
+    More expressive than concat because it modulates at every stage
+    without inflating channel dimensions.
+
+    Args:
+        None — adapts to input shapes at build time.
+    """
+
+    def build(self, input_shape):
+        from agx_core.layers import Sequential
+
+        feature_shape, cond_shape = input_shape
+        n_channels = feature_shape[_axis_channel()]
+        self.gamma = Sequential(
+            [
+                keras.layers.Conv2D(
+                    n_channels, 1, kernel_initializer="zeros", bias_initializer="zeros"
+                ),
+                keras.layers.GlobalAveragePooling2D(keepdims=True),
+            ]
+        )
+        self.beta = Sequential(
+            [
+                keras.layers.Conv2D(
+                    n_channels, 1, kernel_initializer="zeros", bias_initializer="zeros"
+                ),
+                keras.layers.GlobalAveragePooling2D(keepdims=True),
+            ]
+        )
+        self.gamma.build(cond_shape)
+        self.beta.build(cond_shape)
+        super(FiLM, self).build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[0]
+
+    def call(self, inputs):
+        features, cond = inputs
+        g = self.gamma(cond)
+        b = self.beta(cond)
+        return features * (1.0 + g) + b
+
+    def get_config(self):
+        return super().get_config()
+
+
 __all__ = [
     "Split",
     "ConvBlock",
     "DeConvBlock",
     "ResidualBlock",
     "Reparameterization",
+    "SqueezeExcite",
+    "InvertedResidualBlock",
+    "UpsampleRefine",
+    "FiLM",
 ]

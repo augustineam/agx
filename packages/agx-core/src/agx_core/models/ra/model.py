@@ -19,6 +19,27 @@ def log_normal_pdf(sample, mean, logvar, axis=1):
     )
 
 
+def kl_divergence(mean, logvar):
+    """Closed-form KLD from N(mean, exp(logvar)) to N(0, I), per spatial position.
+
+    With a spatial latent (B, H, W, C), this returns a (B, H, W) map where
+    each position measures how "unusual" the encoding is at that location.
+
+    KLD = 0.5 * Σ_c (μ² + exp(logvar) - logvar - 1)
+
+    This replaces the Monte Carlo estimate (log q(z|x) - log p(z)) which
+    requires sampling z and has non-zero variance. The closed form is
+    exact, lower variance, and cheaper to compute.
+
+    Returns:
+        KLD map of shape (B, H, W) — sum over channels, spatial preserved.
+    """
+    return 0.5 * ops.sum(
+        ops.square(mean) + ops.exp(logvar) - logvar - 1.0,
+        axis=_axis_channel(),
+    )
+
+
 def embedding_loss(
     teacher_embedds: Sequence[keras.KerasTensor],
     student_embedds: Sequence[keras.KerasTensor],
@@ -127,7 +148,6 @@ class ReversedAutoencoderBase(Model):
             self.scale = 32 / np.prod(spatial) ** 0.5
 
         self.encoder.build([x_shape, c_shape])
-
         x_shape = self.encoder.compute_output_shape([x_shape, c_shape])
 
         self.reparameterize.build(x_shape)
@@ -193,9 +213,9 @@ class ReversedAutoencoderBase(Model):
 
         # [N], [N], [N], [N], [N]
         logpx_z_real = -self.scale * ops.sum(pixel_mse(real, rec_real), axis=[1, 2])
-        logpz_real = log_normal_pdf(z_real, 0.0, 0.0, axis=[1, 2, 3])
-        logqz_x_real = log_normal_pdf(z_real, mean_real, logvar_real, axis=[1, 2, 3])
-        kld_real = self.scale * (logqz_x_real - logpz_real)
+        kld_real = ops.mean(
+            self.scale * kl_divergence(mean_real, logvar_real), axis=[1, 2]
+        )
         elbo_real = logpx_z_real - kld_real
 
         # For fake and reconstructed samples, we want to minimize the ELBO
@@ -207,18 +227,16 @@ class ReversedAutoencoderBase(Model):
         logpx_z_rec = -self.scale * ops.sum(
             pixel_mse(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
         )
-        logpz_rec = log_normal_pdf(z_rec, 0.0, 0.0, axis=[1, 2, 3])
-        logqz_x_rec = log_normal_pdf(z_rec, mean_rec, logvar_rec, axis=[1, 2, 3])
-        kld_rec = self.scale * (logqz_x_rec - logpz_rec)
+        kld_rec = ops.mean(self.scale * kl_divergence(mean_rec, logvar_rec), axis=[1, 2])
         elbo_rec = logpx_z_rec - kld_rec
 
         # [N], [N], [N], [N]
         logpx_z_fake = -self.scale * ops.sum(
             pixel_mse(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
         )
-        logpz_fake = log_normal_pdf(z_fake, 0.0, 0.0, axis=[1, 2, 3])
-        logqz_x_fake = log_normal_pdf(z_fake, mean_fake, logvar_fake, axis=[1, 2, 3])
-        kld_fake = self.scale * (logqz_x_fake - logpz_fake)
+        kld_fake = ops.mean(
+            self.scale * kl_divergence(mean_fake, logvar_fake), axis=[1, 2]
+        )
         elbo_fake = logpx_z_fake - kld_fake
 
         # Exponential curriculum weighting: focus training on hardest-to-discriminate samples
@@ -339,18 +357,16 @@ class ReversedAutoencoderBase(Model):
         logpx_z_rec = -self.scale * ops.sum(
             pixel_mse(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
         )
-        logpz_rec = log_normal_pdf(z_rec, 0.0, 0.0, axis=[1, 2, 3])
-        logqz_x_rec = log_normal_pdf(z_rec, mean_rec, logvar_rec, axis=[1, 2, 3])
-        kld_rec = self.scale * (logqz_x_rec - logpz_rec)
+        kld_rec = ops.mean(self.scale * kl_divergence(mean_rec, logvar_rec), axis=[1, 2])
         elbo_rec = logpx_z_rec - kld_rec
 
         # [N], [N], [N], [N], [N]
         logpx_z_fake = -self.scale * ops.sum(
             pixel_mse(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
         )
-        logpz_fake = log_normal_pdf(z_fake, 0.0, 0.0, axis=[1, 2, 3])
-        logqz_x_fake = log_normal_pdf(z_fake, mean_fake, logvar_fake, axis=[1, 2, 3])
-        kld_fake = self.scale * (logqz_x_fake - logpz_fake)
+        kld_fake = ops.mean(
+            self.scale * kl_divergence(mean_fake, logvar_fake), axis=[1, 2]
+        )
         elbo_fake = logpx_z_fake - kld_fake
 
         loss = ops.mean(-elbo_real - 0.5 * (elbo_rec + elbo_fake) + embed_loss)
@@ -492,33 +508,38 @@ class ReversedAutoencoderBase(Model):
         loss_embed = embedding_loss(embeds_real, embeds_rec) / (self.scale**2)
 
         # [N], [N], [N], [N], [N]
+        kld_real = ops.mean(
+            self.scale * kl_divergence(mean_real, logvar_real), axis=[1, 2]
+        )
+        kld_rec = ops.mean(self.scale * kl_divergence(mean_rec, logvar_rec), axis=[1, 2])
+        kld_fake = ops.mean(
+            self.scale * kl_divergence(mean_fake, logvar_fake), axis=[1, 2]
+        )
+
         logpx_z_real = -self.scale * ops.sum(pixel_mse(real, rec_real), axis=[1, 2])
-        logpz_real = log_normal_pdf(z_real, 0.0, 0.0, axis=[1, 2, 3])
-        logqz_x_real = log_normal_pdf(z_real, mean_real, logvar_real, axis=[1, 2, 3])
-        kld_real = self.scale * (logqz_x_real - logpz_real)
         elbo_real = logpx_z_real - kld_real
 
-        # [N], [N], [N], [N], [N]
         logpx_z_rec = -self.scale * ops.sum(
             pixel_mse(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
         )
-        logpz_rec = log_normal_pdf(z_rec, 0.0, 0.0, axis=[1, 2, 3])
-        logqz_x_rec = log_normal_pdf(z_rec, mean_rec, logvar_rec, axis=[1, 2, 3])
-        kld_rec = self.scale * (logqz_x_rec - logpz_rec)
         elbo_rec = logpx_z_rec - kld_rec
 
-        # [N], [N], [N], [N], [N]
         logpx_z_fake = -self.scale * ops.sum(
             pixel_mse(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
         )
-        logpz_fake = log_normal_pdf(z_fake, 0.0, 0.0, axis=[1, 2, 3])
-        logqz_x_fake = log_normal_pdf(z_fake, mean_fake, logvar_fake, axis=[1, 2, 3])
-        kld_fake = self.scale * (logqz_x_fake - logpz_fake)
         elbo_fake = logpx_z_fake - kld_fake
+
+        expelbo_rec = -elbo_rec * ops.exp(self.scale * elbo_rec)
+        expelbo_fake = -elbo_fake * ops.exp(self.scale * elbo_fake)
+
+        loss_enc = ops.mean(-elbo_real + 0.5 * (expelbo_rec + expelbo_fake))
+        loss_dec = ops.mean(-elbo_real - 0.5 * (elbo_rec + elbo_fake) + loss_embed)
 
         self.elbo_real_tracker.update_state(elbo_real)
         self.elbo_rec_tracker.update_state(elbo_rec)
         self.elbo_fake_tracker.update_state(elbo_fake)
+        self.loss_enc_tracker.update_state(loss_enc)
+        self.loss_dec_tracker.update_state(loss_dec)
         self.loss_rec_tracker.update_state(-logpx_z_real)
         self.loss_embed_tracker.update_state(loss_embed)
         self.kld_real_tracker.update_state(kld_real)
@@ -530,6 +551,8 @@ class ReversedAutoencoderBase(Model):
             elbo_real=self.elbo_real_tracker.result(),
             elbo_rec=self.elbo_rec_tracker.result(),
             elbo_fake=self.elbo_fake_tracker.result(),
+            loss_enc=self.loss_enc_tracker.result(),
+            loss_dec=self.loss_dec_tracker.result(),
             loss_rec=self.loss_rec_tracker.result(),
             loss_embed=self.loss_embed_tracker.result(),
             diff_kld=self.diff_kld_tracker.result(),

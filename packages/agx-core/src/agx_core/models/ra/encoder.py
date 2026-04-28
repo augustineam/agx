@@ -4,13 +4,14 @@ import keras
 
 from typing import Sequence, Optional
 
-from .base import BaseEncoder
-from .layers import *
-from .layers import _axis_channel
+from agx_core.models.ra.base import BaseEncoder
+from agx_core.models.ra.layers import *
+from agx_core.models.ra.layers import _axis_channel
+from agx_core.layers import Sequential
 
 
 @keras.saving.register_keras_serializable(package="agx_core.models.ra")
-class Encoder(BaseEncoder):
+class ResNetEncoder(BaseEncoder):
     """Encoder mapping images to latent mean and log-variance parameters.
 
     Fully Convolutional Network (FCN) architecture:
@@ -29,7 +30,9 @@ class Encoder(BaseEncoder):
         name: str = "encoder",
         **kwargs,
     ):
-        super(Encoder, self).__init__(latent_size=latent_size, name=name, **kwargs)
+        super(ResNetEncoder, self).__init__(
+            latent_size=latent_size, name=name, **kwargs
+        )
 
         self.filters = filters
         self.blocks: list[keras.layers.Layer] = [
@@ -56,7 +59,7 @@ class Encoder(BaseEncoder):
             resolution = x_shape[1:3]
         else:
             resolution = x_shape[2:]
-            
+
         # Map downsampled spatial features directly to 1x1 latent dimensions
         self.conv = keras.layers.Conv2D(
             2 * self.latent_size,
@@ -71,8 +74,8 @@ class Encoder(BaseEncoder):
         x_shape = self.conv.compute_output_shape(x_shape)
         self.split.build(x_shape)
 
-        super(Encoder, self).build(input_shape)
-    
+        super(ResNetEncoder, self).build(input_shape)
+
     def call(
         self,
         inputs: Sequence[keras.KerasTensor],
@@ -103,4 +106,102 @@ class Encoder(BaseEncoder):
         return config
 
 
-__all__ = ["Encoder"]
+@keras.saving.register_keras_serializable(package="agx_core.models.ra")
+class Encoder(BaseEncoder):
+
+    def __init__(
+        self,
+        latent_size: int,
+        backbone: Sequence[keras.layers.Layer],
+        name="mbnetv3",
+        **kwargs,
+    ):
+        super(Encoder, self).__init__(latent_size, name=name, **kwargs)
+
+        self.backbone = backbone
+        self.gray2rgb = Sequential(
+            [
+                keras.layers.Conv2D(
+                    3, kernel_size=(3, 3), strides=(1, 1), padding="same"
+                ),
+                keras.layers.LayerNormalization(),
+                keras.layers.Activation("tanh"),
+            ]
+        )
+        self.concat = keras.layers.Concatenate(_axis_channel())
+        self.to_latent = keras.layers.Conv2D(latent_size * 2, 1)
+        self.split = Split(2, axis=_axis_channel())
+
+    def build(self, input_shape: Sequence[Sequence[int]]):
+        x_shape, c_shape = input_shape
+
+        if keras.config.image_data_format() == "channels_last":
+            spatial = slice(1, 3)
+        else:
+            spatial = slice(2, None)
+
+        self.gray2rgb.build(x_shape)
+
+        for block in self.backbone:
+            h, w = x_shape[spatial]
+            block.build(x_shape)
+            x_shape = list(x_shape)
+            x_shape[spatial] = [h // 2, w // 2]
+
+        resolution = x_shape[spatial]
+        if keras.config.image_data_format() == "channels_last":
+            x_shape = (x_shape[0], *resolution, 576)
+        else:
+            x_shape = (x_shape[0], 576, *resolution)
+
+        self._latent_spatial_res = tuple(resolution)
+        self.concat.build([x_shape, c_shape])
+        x_shape = self.concat.compute_output_shape([x_shape, c_shape])
+
+        self.to_latent.build(x_shape)
+        x_shape = self.to_latent.compute_output_shape(x_shape)
+
+        self.split.build(x_shape)
+
+        super(Encoder, self).build(input_shape)
+
+    def train_backbone(self, train: bool):
+        for layer in self.backbone:
+            layer.trainable = train
+
+    def call(
+        self,
+        inputs: Sequence[keras.KerasTensor],
+        training: Optional[bool] = None,
+    ) -> Sequence[keras.KerasTensor]:
+        x, c = inputs
+
+        x = self.gray2rgb(x, training=training)
+        embeddings = []
+        for layer in self.backbone:
+            x = layer(x, training=training)
+            embeddings.append(x)
+
+        x = self.concat([x, c])
+        x = self.to_latent(x)
+
+        mean, logvar = self.split(x)
+        return (mean, logvar), embeddings
+
+    def get_config(self):
+        config = super().get_config()
+        backbone_cfg = [
+            keras.saving.serialize_keras_object(layer) for layer in self.backbone
+        ]
+        config.update(dict(backbone=backbone_cfg))
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        backbone = [
+            keras.saving.deserialize_keras_object(cfg) for cfg in config.pop("backbone")
+        ]
+        return cls(backbone=backbone, **config)
+
+
+__all__ = ["Encoder", "ResNetEncoder"]
