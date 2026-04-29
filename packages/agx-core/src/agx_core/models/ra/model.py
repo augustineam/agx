@@ -1,5 +1,4 @@
 import keras
-import numpy as np
 
 from typing import Sequence, Optional
 
@@ -7,7 +6,6 @@ from keras import metrics, Model, ops
 
 from .base import BaseEncoder, BaseDecoder
 from .layers import Reparameterization, _axis_channel
-from .optimizer import RAOptimizer
 
 
 def kl_divergence(mean, logvar):
@@ -95,9 +93,12 @@ class ReversedAutoencoderBase(Model):
     """Reversed Autoencoder orchestrating adversarial training between encoder and decoder.
 
     The encoder and decoder are instantiated externally and passed to this model.
+    Call ``compile(enc_optimizer, dec_optimizer)`` before training — no ``loss``
+    argument is needed because the training step computes losses internally.
     """
 
-    optimizer: RAOptimizer
+    enc_optimizer: keras.optimizers.Optimizer
+    dec_optimizer: keras.optimizers.Optimizer
     encoder: BaseEncoder
     decoder: BaseDecoder
 
@@ -113,7 +114,7 @@ class ReversedAutoencoderBase(Model):
         name: str = "reversed_autoencoder",
         **kwargs,
     ):
-        super().__init__(name=name, **kwargs)
+        super(ReversedAutoencoderBase, self).__init__(name=name, **kwargs)
 
         self.encoder = encoder
         self.decoder = decoder
@@ -123,9 +124,13 @@ class ReversedAutoencoderBase(Model):
         self.expelbo_temp = expelbo_temp
         self.lambda_embed = lambda_embed
 
+        # Two independent optimizers — set via compile()
+        self.enc_optimizer: Optional[keras.optimizers.Optimizer] = None
+        self.dec_optimizer: Optional[keras.optimizers.Optimizer] = None
+
         # Turn-taking flags — controlled by AdversarialEquilibriumCallback
-        self.train_encoder_enable = True
-        self.train_decoder_enable = True
+        self.train_encoder_enabled = True
+        self.train_decoder_enabled = True
 
         self.loss_enc_tracker = metrics.Mean("loss_enc")
         self.loss_dec_tracker = metrics.Mean("loss_dec")
@@ -167,6 +172,10 @@ class ReversedAutoencoderBase(Model):
     def build(self, input_shape: Sequence[Sequence[int]]):
         x_shape, c_shape = input_shape
 
+        # Stash for get_build_config before any shape mutation.
+        self._img_shape = tuple(x_shape)
+        self._cond_shape = tuple(c_shape)
+
         self.encoder.build([x_shape, c_shape])
         x_shape = self.encoder.compute_output_shape([x_shape, c_shape])
 
@@ -177,12 +186,102 @@ class ReversedAutoencoderBase(Model):
 
         super(ReversedAutoencoderBase, self).build(input_shape)
 
-    def compile(self, optimizer: keras.Optimizer, **kwargs):
-        print("Calling optimizer RABase")
-        super(ReversedAutoencoderBase, self).compile(optimizer, **kwargs)
-        if isinstance(optimizer, RAOptimizer):
-            self.optimizer.enc.build(self.encoder.trainable_variables)
-            self.optimizer.dec.build(self.decoder.trainable_variables)
+    def get_build_config(self):
+        """Persist the two input shapes so build_from_config can rebuild optimizers."""
+        return {
+            "img_shape": self._img_shape,
+            "cond_shape": self._cond_shape,
+        }
+
+    def build_from_config(self, config):
+        """Mark the model as built (sub-layers are already restored).
+
+        During deserialization the sub-layers (encoder, decoder, reparameterize)
+        are reconstructed and built by their own ``from_config`` /
+        ``build_from_config`` calls before this method is reached.  Re-calling
+        ``build()`` would attempt to add new variables to already-locked layer
+        trackers and raise a ``ValueError``.
+
+        Optimizer building is intentionally deferred to ``compile_from_config``
+        which runs *after* this in the Keras deserialization sequence.
+        """
+        self._img_shape = tuple(config["img_shape"])
+        self._cond_shape = tuple(config["cond_shape"])
+        self.built = True
+
+    def _build_optimizers_if_needed(self):
+        """Build enc/dec optimizers against *all* sub-layer variables.
+
+        Uses ``layer.variables`` (not ``trainable_variables``) so that the
+        optimizer slot count is independent of the transient ``trainable``
+        flag.  During adversarial training the flag is toggled every step,
+        and ``test_step`` sets both to ``False``.  If the model is saved in
+        that state the config persists ``trainable: false``, causing
+        ``trainable_variables`` to return an empty list on reload.  Building
+        against ``variables`` guarantees the optimizer always creates the
+        correct number of slots and saved momentum / adaptive-rate state can
+        be restored without a mismatch.
+
+        Safe to call multiple times — Keras optimizers are idempotent once
+        built. Called from both compile() (live training path) and
+        build_from_config() (deserialization path) to guarantee the optimizers
+        always have the correct number of slot variables before Keras tries to
+        restore saved state into them.
+        """
+        if self.enc_optimizer is not None and not self.enc_optimizer.built:
+            self.enc_optimizer.build(self.encoder.variables)
+        if self.dec_optimizer is not None and not self.dec_optimizer.built:
+            self.dec_optimizer.build(self.decoder.variables)
+
+    def compile(
+        self,
+        enc_optimizer: keras.optimizers.Optimizer,
+        dec_optimizer: keras.optimizers.Optimizer,
+        **kwargs,
+    ):
+        """Compile the model with separate optimizers for encoder and decoder.
+
+        No ``loss`` argument is accepted — losses are computed inside
+        ``train_step`` / ``test_step`` and are not routed through the
+        standard Keras loss machinery.
+
+        Args:
+            enc_optimizer: Optimizer used to update the encoder's weights.
+            dec_optimizer: Optimizer used to update the decoder's weights.
+        """
+        # Pass optimizer=None so the base Trainer does not create a phantom
+        # rmsprop optimizer that would be saved/loaded alongside our real ones.
+        super(ReversedAutoencoderBase, self).compile(optimizer=None, **kwargs)
+        self.enc_optimizer = enc_optimizer
+        self.dec_optimizer = dec_optimizer
+        if self.built:
+            self._build_optimizers_if_needed()
+
+    def compile_from_config(self, config):
+        """Restore both optimizers from a serialized config produced by get_compile_config.
+
+        Keras deserialization order (``serialization_lib.py``):
+          1. ``from_config()``  — sub-layers recursively built
+          2. ``build_from_config()`` — only if ``not instance.built``
+          3. ``compile_from_config()`` — this method
+          4. ``_load_state()`` — weight & optimizer-state restoration
+
+        By step 3 the sub-layers are fully reconstructed and their
+        ``.variables`` lists are populated, so we can build the optimizers
+        eagerly here.  This ensures the optimizer slot counts match the
+        saved state *before* step 4 tries to load them.
+        """
+        enc_optimizer = keras.optimizers.deserialize(config["enc_optimizer"])
+        dec_optimizer = keras.optimizers.deserialize(config["dec_optimizer"])
+        self.compile(enc_optimizer, dec_optimizer)
+        self._build_optimizers_if_needed()
+
+    def get_compile_config(self):
+        """Serialize the optimizer pair so that compile_from_config can restore them."""
+        return {
+            "enc_optimizer": keras.optimizers.serialize(self.enc_optimizer),
+            "dec_optimizer": keras.optimizers.serialize(self.dec_optimizer),
+        }
 
     def call(
         self,
@@ -467,15 +566,6 @@ class ReversedAutoencoderBase(Model):
             batch_real, batch_noise, batch_cond, z_real, embeds_real, kld_real
         )
 
-        # Update optimizer iterations to match encoder iterations
-        # so that callbacks can work properly accessing optimizer.iterations
-        if hasattr(self.optimizer, "_iterations"):
-            self.optimizer.assign(
-                self.optimizer._iterations, self.optimizer.enc.iterations
-            )
-        else:
-            self.optimizer.iterations = self.optimizer.enc.iterations
-
         return self.get_metrics_result()
 
     def test_step(self, data):
@@ -487,9 +577,6 @@ class ReversedAutoencoderBase(Model):
         Returns:
             Dictionary of evaluation metrics
         """
-
-        self.encoder.trainable = False
-        self.decoder.trainable = False
 
         (real, cond), _ = data
 
@@ -588,6 +675,7 @@ class ReversedAutoencoderBase(Model):
                 beta_kld=self.beta_kld,
                 expelbo_temp=self.expelbo_temp,
                 lambda_embed=self.lambda_embed,
+                freeze_backbone=self.freeze_backbone,
             )
         )
         return config

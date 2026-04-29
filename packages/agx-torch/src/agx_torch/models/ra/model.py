@@ -42,7 +42,7 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
         )
 
     def train_encoder(self, real, noise, condition):
-        if self.train_encoder_enable:
+        if self.train_encoder_enabled:
             self.encoder.trainable = True
             self.decoder.trainable = False
 
@@ -64,7 +64,7 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
             grads = [v.value.grad for v in trainable_vars]
 
             with torch.no_grad():
-                self.optimizer.enc.apply(grads, trainable_vars)
+                self.enc_optimizer.apply(grads, trainable_vars)
 
             self.update_step_metrics(metric_updates)
         else:
@@ -94,7 +94,7 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
             grads = [v.value.grad for v in trainable_vars]
 
             with torch.no_grad():
-                self.optimizer.dec.apply(grads, trainable_vars)
+                self.dec_optimizer.apply(grads, trainable_vars)
 
             self.update_step_metrics(metric_updates)
         else:
@@ -106,7 +106,6 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
             
     @classmethod
     def from_config(cls, config: Dict[str, Any]):
-        print(config)
         encoder = keras.saving.deserialize_keras_object(config.pop("encoder"))
         decoder = keras.saving.deserialize_keras_object(config.pop("decoder"))
         reparameterize = keras.saving.deserialize_keras_object(

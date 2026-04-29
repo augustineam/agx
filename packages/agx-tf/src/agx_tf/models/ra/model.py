@@ -21,7 +21,7 @@ class ReversedAutoencoder(ReversedAutoencoderBase):
             )
 
         grads = tape.gradient(loss, self.encoder.trainable_variables)
-        self.optimizer.enc.apply_gradients(zip(grads, self.encoder.trainable_variables))
+        self.enc_optimizer.apply_gradients(zip(grads, self.encoder.trainable_variables))
 
         self.update_step_metrics(metric_updates)
         return aux_outputs
@@ -36,6 +36,6 @@ class ReversedAutoencoder(ReversedAutoencoderBase):
             )
 
         grads = tape.gradient(loss, self.decoder.trainable_variables)
-        self.optimizer.dec.apply_gradients(zip(grads, self.decoder.trainable_variables))
+        self.dec_optimizer.apply_gradients(zip(grads, self.decoder.trainable_variables))
 
         self.update_step_metrics(metric_updates)
