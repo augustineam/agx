@@ -1,3 +1,5 @@
+import numpy as np
+
 from albumentations import ImageOnlyTransform
 from albumentations.augmentations.pixel import functional as F
 
@@ -10,10 +12,16 @@ class BrightnessAndContrast(ImageOnlyTransform):
         self._contrast = contrast
         self._brightness = brightness
 
-    def apply(self, image, **params):
+    def apply(self, image: np.ndarray, **params):
         image = F.adjust_contrast_torchvision(image, self._contrast)
         image = F.adjust_brightness_torchvision(image, self._brightness)
         return image
+
+    def get_transform_init_args_names(self) -> tuple[str, ...]:
+        return (
+            "contrast",
+            "brightness",
+        )
 
 
 __all__ = ["BrightnessAndContrast"]

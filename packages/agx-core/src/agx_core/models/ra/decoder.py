@@ -5,7 +5,7 @@ import keras
 from typing import Sequence, Optional
 
 from .base import BaseDecoder
-from .layers import _axis_channel
+from .layers import _axis_channel, _layer_norm_axis
 from .layers import *
 from ._spatial import *
 
@@ -125,23 +125,32 @@ class DecoderStage(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable(package="agx_core.models.ra")
 class Decoder(BaseDecoder):
-    """MobileNetV3-symmetric decoder with FiLM conditioning.
+    """MobileNetV3-Small-symmetric decoder.
 
     Architecture:
-        Latent z (B, 1, 1, C)
-            → ConvTranspose to bottleneck spatial size (e.g., 3×3)
-            → [DecoderStage: FiLM → InvRes×N → Upsample 2×] × num_stages
-            → Final InvRes refinement
+        [latent_z, cond] (B, 7, 7, C)
+            → Concat → Conv 1×1 stem (mirrors encoder Top conv)
+            → [DecoderStage: InvRes×N → Upsample 2×] × 5 stages
+            → Final InvRes refinement at full resolution
             → Conv 3×3 → output activation
 
-    Design choices vs. the original decoder:
+    Stage layout (exact mirror of MobileNetV3 Small encoder):
+        Stem:    513ch → 96ch    Conv 1×1 + LN + h-swish    (encoder Top reversed)
+        Stage 0:  7×7   → 14×14  3× InvRes k5 SE  96ch    (encoder S4 reversed)
+        Stage 1: 14×14  → 28×28  5× InvRes k5 SE  48ch    (encoder S3 reversed)
+        Stage 2: 28×28  → 56×56  2× InvRes k3     24ch    (encoder S2 reversed)
+        Stage 3: 56×56  →112×112 1× InvRes k3 SE  16ch    (encoder S1 reversed)
+        Stage 4:112×112 →224×224 1× InvRes k3     16ch    (encoder Stem reversed)
+        Head:   224×224          InvRes + Conv 3×3 → out
+
+    Design choices:
+        - 1×1 stem projection narrows wide latent to stage width
+          (prevents expand_ratio blow-up on first InvRes)
         - Bilinear upsample + conv instead of ConvTranspose
           (eliminates checkerboard artifacts)
         - Inverted residual blocks with SE attention instead of
           standard ResBlocks (3× more expressive per parameter)
-        - FiLM conditioning at every stage instead of concat at
-          bottleneck (richer product-type / acquisition conditioning)
-        - Supports progressive growing for stage-by-stage training
+        - ~1.4M params vs encoder's ~0.9M (1.5× ratio)
 
     Args:
         stage_config: List of dicts, one per upsampling stage. Each dict:
@@ -150,52 +159,64 @@ class Decoder(BaseDecoder):
             expand_ratio (float): InvRes expansion (default 4.0)
             kernel_size (int): DW conv kernel (default 3)
             se_ratio (float): SE reduction (default 0.25)
+            upsample (bool): Whether to 2× upsample (default True)
         target_shape: Output spatial shape (H, W, C) or (C, H, W).
         output_activation: Final activation ('tanh' or 'sigmoid').
     """
 
-    # Sensible defaults matching MobileNetV3 Small's depth profile
+    # Exact mirror of MobileNetV3 Small encoder (reversed).
+    #
+    # Encoder (forward):                         Decoder (reverse):
+    #   Stem  224→112  Conv 3×3 s2    →16ch       Stage 4  112×112  head
+    #   S1    112→56   1× InvRes k3   →16ch       Stage 3   56×56   1× InvRes k3  SE  →16ch
+    #   S2     56→28   2× InvRes k3   →24ch       Stage 2   28×28   2× InvRes k3      →24ch
+    #   S3     28→14   5× InvRes k5   →48ch       Stage 1   14×14   5× InvRes k5  SE  →48ch
+    #   S4     14→7    3× InvRes k5   →96ch       Stage 0    7×7    3× InvRes k5  SE  →96ch
+    #   Top    7→7     Conv 1×1       →576ch
     DEFAULT_STAGE_CONFIG = [
-        {
-            "filters": 256,
-            "num_blocks": 1,
-            "expand_ratio": 2.0,
-            "kernel_size": 5,
-            "dropout_rate": 0.2,
-        },
+        # 7×7 — mirrors encoder Stage 4 (expanded_conv_8..10)
         {
             "filters": 96,
             "num_blocks": 3,
-            "expand_ratio": 2.0,
+            "expand_ratio": 6.0,
             "kernel_size": 5,
+            "se_ratio": 0.25,
             "dropout_rate": 0.2,
         },
+        # 14×14 — mirrors encoder Stage 3 (expanded_conv_3..7)
         {
             "filters": 48,
-            "num_blocks": 2,
-            "expand_ratio": 1.5,
-            "kernel_size": 3,
-            "dropout_rate": 0.1,
+            "num_blocks": 5,
+            "expand_ratio": 4.0,
+            "kernel_size": 5,
+            "se_ratio": 0.25,
+            "dropout_rate": 0.15,
         },
-        {
-            "filters": 40,
-            "num_blocks": 3,
-            "expand_ratio": 1.5,
-            "kernel_size": 3,
-            "dropout_rate": 0.1,
-        },
+        # 28×28 — mirrors encoder Stage 2 (expanded_conv_1..2)
         {
             "filters": 24,
             "num_blocks": 2,
-            "expand_ratio": 1.5,
+            "expand_ratio": 3.67,
             "kernel_size": 3,
-            "dropout_rate": 0.05,
+            "se_ratio": 0.0,
+            "dropout_rate": 0.1,
         },
+        # 56×56 — mirrors encoder Stage 1 (expanded_conv_0)
         {
             "filters": 16,
             "num_blocks": 1,
             "expand_ratio": 1.0,
             "kernel_size": 3,
+            "se_ratio": 0.25,
+            "dropout_rate": 0.05,
+        },
+        # 112×112 — mirrors encoder Stem (no upsample, head only)
+        {
+            "filters": 16,
+            "num_blocks": 1,
+            "expand_ratio": 1.0,
+            "kernel_size": 3,
+            "se_ratio": 0.0,
             "dropout_rate": 0.0,
         },
     ]
@@ -216,19 +237,20 @@ class Decoder(BaseDecoder):
         out_ch = self.target_shape[ch_dim]
 
         self.concat = keras.layers.Concatenate(_axis_channel())
-        # # --- Stem: channel expansion only (spatial already 7×7) ---
-        # stem_filters = self.stage_config[0]["filters"]
-        # self.stem_conv = keras.layers.Conv2D(
-        #     stem_filters, 1, padding="same", use_bias=False
-        # )
-        # self.stem_norm = keras.layers.LayerNormalization(axis=_layer_norm_axis())
-        # self.stem_act = keras.layers.Activation("relu6")
 
-        num_stages = len(self.stage_config)
+        # --- Stem: mirrors encoder Top (Conv 1×1 96→576) in reverse ---
+        # Projects wide latent+cond channels down to stage_0 width
+        # before InvRes blocks see it (prevents expand_ratio blow-up).
+        stem_filters = self.stage_config[0]["filters"]
+        self.stem_conv = keras.layers.Conv2D(
+            stem_filters, 1, padding="same", use_bias=False
+        )
+        self.stem_norm = keras.layers.LayerNormalization(axis=_layer_norm_axis())
+        self.stem_act = keras.layers.Activation("hard_swish")
+
         # --- Decoder stages ---
         self.stages = []
         for i, cfg in enumerate(self.stage_config):
-            is_last = i == (num_stages - 1)
             self.stages.append(
                 DecoderStage(
                     filters=cfg["filters"],
@@ -236,7 +258,8 @@ class Decoder(BaseDecoder):
                     expand_ratio=cfg.get("expand_ratio", 4.0),
                     kernel_size=cfg.get("kernel_size", 3),
                     se_ratio=cfg.get("se_ratio", 0.25),
-                    upsample=not is_last,
+                    upsample=cfg.get("upsample", True),
+                    dropout_rate=cfg.get("dropout_rate", 0.0),
                     name=f"stage_{i}",
                 )
             )
@@ -257,9 +280,9 @@ class Decoder(BaseDecoder):
         self.concat.build([x_shape, c_shape])
         x_shape = self.concat.compute_output_shape([x_shape, c_shape])
 
-        # self.stem_conv.build(x_shape)
-        # x_shape = self.stem_conv.compute_output_shape(x_shape)
-        # self.stem_norm.build(x_shape)
+        self.stem_conv.build(x_shape)
+        x_shape = self.stem_conv.compute_output_shape(x_shape)
+        self.stem_norm.build(x_shape)
 
         for stage in self.stages:
             stage.build(x_shape)  # ([x_shape, c_shape])
@@ -274,8 +297,8 @@ class Decoder(BaseDecoder):
 
     def compute_output_shape(self, input_shape):
         x_shape, c_shape = input_shape
-        # x_shape = self.stem_conv.compute_output_shape(x_shape)
         x_shape = self.concat.compute_output_shape([x_shape, c_shape])
+        x_shape = self.stem_conv.compute_output_shape(x_shape)
         for stage in self.stages:
             x_shape = stage.compute_output_shape(x_shape)  # ([x_shape, c_shape])
         x_shape = self.head_block.compute_output_shape(x_shape)
@@ -284,11 +307,11 @@ class Decoder(BaseDecoder):
     def call(self, inputs, training=None):
         x, cond = inputs
 
-        # Stem: expand to spatial bottleneck
-        # x = self.stem_conv(x)
-        # x = self.stem_norm(x, training=training)
-        # x = self.stem_act(x)
+        # Stem: project wide latent → narrow stage width
         x = self.concat([x, cond])
+        x = self.stem_conv(x)
+        x = self.stem_norm(x, training=training)
+        x = self.stem_act(x)
 
         # Progressive decode through stages
         for stage in self.stages:

@@ -19,58 +19,6 @@ def _layer_norm_axis():
         return -1
     return [2, 3]
 
-
-@keras.saving.register_keras_serializable(package="agx_core.models.ra")
-class Split(keras.layers.Layer):
-    """Splits an input tensor along a specified axis.
-
-    Args:
-        num_or_size_splits: Number of equal splits or sizes of each split.
-        axis: Axis to split along (default: -1 if 'channels_last', 1 otherwise).
-    """
-
-    def __init__(self, num_or_size_splits, axis=-1, name="split", **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.num_or_size_splits = num_or_size_splits
-        self.axis = axis
-
-    def build(self, input_shape: Sequence[int]):
-        self.input_spec = keras.layers.InputSpec(shape=(None, *input_shape[1:]))
-        super(Split, self).build(input_shape)
-
-    def compute_output_shape(self, input_shape: Sequence[int]):
-        input_shape = list(input_shape)
-        axis = self.axis if self.axis >= 0 else len(input_shape) + self.axis
-
-        if isinstance(self.num_or_size_splits, int):
-            # Equal splits
-            split_size = input_shape[axis] // self.num_or_size_splits
-            output_shapes = []
-            for _ in range(self.num_or_size_splits):
-                output_shape = input_shape.copy()
-                output_shape[axis] = split_size
-                output_shapes.append(tuple(output_shape))
-        else:
-            # Custom split sizes
-            output_shapes = []
-            for size in self.num_or_size_splits:
-                output_shape = input_shape.copy()
-                output_shape[axis] = size
-                output_shapes.append(tuple(output_shape))
-
-        return output_shapes
-
-    def call(self, inputs):
-        return ops.split(inputs, self.num_or_size_splits, axis=self.axis)
-
-    def get_config(self):
-        config = super().get_config()
-        config.update(
-            {"num_or_size_splits": self.num_or_size_splits, "axis": self.axis}
-        )
-        return config
-
-
 @keras.saving.register_keras_serializable(package="agx_core.models.ra")
 class ConvBlock(keras.layers.Layer):
     """Fusing Conv2D, LayerNormalization, and optional LeakyReLU.
@@ -608,7 +556,6 @@ class FiLM(keras.layers.Layer):
 
 
 __all__ = [
-    "Split",
     "ConvBlock",
     "DeConvBlock",
     "ResidualBlock",

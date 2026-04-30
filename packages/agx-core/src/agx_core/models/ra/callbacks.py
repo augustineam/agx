@@ -38,6 +38,8 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
             Higher values = smoother, slower response (default: 0.99).
         min_pause_steps: Minimum number of steps a component stays paused
             once a threshold is breached, preventing rapid oscillation.
+        warmup_steps: Minimum number of steps the model trains before any
+            equilibrium is applied.
         verbose: Whether to log state transitions.
     """
 
@@ -59,12 +61,12 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
         # State
         self._ema: Optional[float] = None
         self._steps_paused: int = 0
-        self._state: str = "both"  # "both" | "encoder_only" | "decoder_only"
+        self._state: str = "both"  # "both" | "encoder_only" | "decoder_only" | "warmup"
 
     def on_train_begin(self, logs=None):
         self._ema = None
         self._steps_paused = 0
-        self._state = "both"
+        self._state = "warmup"
         self.model.train_encoder_enabled = True
         self.model.train_decoder_enabled = True
 
@@ -83,7 +85,9 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
         if self._ema is None:
             self._ema = diff_kld
         else:
-            self._ema = self.ema_momentum * self._ema + (1 - self.ema_momentum) * diff_kld
+            self._ema = (
+                self.ema_momentum * self._ema + (1 - self.ema_momentum) * diff_kld
+            )
 
         prev_state = self._state
 
@@ -125,6 +129,9 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
                 self._state = "both"
                 self.model.train_encoder_enabled = True
                 self.model.train_decoder_enabled = True
+        elif self._state == "warmup":
+            if self._steps_paused >= self.min_pause_steps:
+                self._state = "both"
 
         if self.verbose and self._state != prev_state:
             print(
@@ -141,7 +148,9 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
             verbose=self.verbose,
         )
 
+
 # ... existing code ...
+
 
 @keras.saving.register_keras_serializable(package="agx_core.models.ra")
 class BackboneThawCallback(keras.callbacks.Callback):
@@ -216,13 +225,9 @@ class BackboneThawCallback(keras.callbacks.Callback):
         # Unfreeze all backbone layers
         encoder.train_backbone(True)
 
-        # Count what we thawed
-        thawed_count = sum(1 for layer in encoder.backbone if layer.trainable)
-
         if self.verbose:
             print(
-                f"\n[Thaw] Unfreezing backbone: {thawed_count} layers, "
-                f"LR factor: {self.backbone_lr_factor}x"
+                f"\n[Thaw] Unfreezing backbone: LR factor: {self.backbone_lr_factor}x"
             )
             print(
                 f"[Thaw] Triggered after {self._wait} epochs without "

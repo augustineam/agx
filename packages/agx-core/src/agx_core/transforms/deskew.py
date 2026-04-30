@@ -246,6 +246,9 @@ def compute_deskew_perspective(
             rect_h,
             angle,
         )
+        if corrected.ndim == 2:
+            corrected = corrected[..., np.newaxis]
+
         return corrected, {
             "angle_deg": angle,
             "method": "perspective",

@@ -169,6 +169,15 @@ class ReversedAutoencoderBase(Model):
             self.expelbo_fake_tracker,
         ]
 
+    def noise(self, batch_size) -> keras.KerasTensor:
+        if self._latent_shape is None:
+            raise ValueError(
+                "Make sure to build the encoder or to set the correct latent space shape"
+            )
+        shape = list(self._latent_shape)
+        shape[0] = batch_size
+        return keras.random.normal(tuple(shape))
+
     def build(self, input_shape: Sequence[Sequence[int]]):
         x_shape, c_shape = input_shape
 
@@ -177,7 +186,9 @@ class ReversedAutoencoderBase(Model):
         self._cond_shape = tuple(c_shape)
 
         self.encoder.build([x_shape, c_shape])
-        x_shape = self.encoder.compute_output_shape([x_shape, c_shape])
+        x_shape, _ = self.encoder.compute_output_shape([x_shape, c_shape])
+
+        self._latent_shape = x_shape[0]
 
         self.reparameterize.build(x_shape)
         x_shape = self.reparameterize.compute_output_shape(x_shape)
@@ -557,7 +568,7 @@ class ReversedAutoencoderBase(Model):
         (batch_real, batch_cond), _ = data
 
         batch_size = ops.shape(batch_real)[0]
-        batch_noise = self.encoder.noise(batch_size)
+        batch_noise = self.noise(batch_size)
 
         z_real, embeds_real, kld_real = self.train_encoder(
             batch_real, batch_noise, batch_cond
@@ -581,7 +592,7 @@ class ReversedAutoencoderBase(Model):
         (real, cond), _ = data
 
         batch_size = ops.shape(real)[0]
-        noise = self.encoder.noise(batch_size)
+        noise = self.noise(batch_size)
 
         # Generate fake samples
         fake = self.decoder([noise, cond], training=False)
