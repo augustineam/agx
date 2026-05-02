@@ -5,10 +5,10 @@ os.environ["KERAS_BACKEND"] = "tensorflow"
 import keras
 import tensorflow as tf
 
-from agx_core.models.ra import ReversedAutoencoderBase
+from agx_core.models.reversed_autoencoder import ReversedAutoencoderBase
 
 
-@keras.saving.register_keras_serializable(package="agx_tf.models.ra")
+@keras.saving.register_keras_serializable(package="agx_tf.models.reversed_autoencoder")
 class ReversedAutoencoder(ReversedAutoencoderBase):
 
     def train_encoder(self, real, noise, condition):

@@ -16,9 +16,9 @@ class Sequential(layers.Layer):
     Fully serializable via keras.saving.
     """
 
-    def __init__(self, layer_list: list[layers.Layer], name="sequential", **kwargs):
+    def __init__(self, *layers: layers.Layer, name="sequential", **kwargs):
         super().__init__(name=name, **kwargs)
-        self._layers = layer_list
+        self._layers = list(layers)
 
     def build(self, input_shape):
         shape = input_shape
