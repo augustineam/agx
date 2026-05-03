@@ -13,7 +13,7 @@ class BrightnessAndContrast(ImageOnlyTransform):
         self._brightness = brightness
 
     def apply(self, image: np.ndarray, **params):
-        image = F.adjust_contrast_torchvision(image, self._contrast)
+        # image = F.adjust_contrast_torchvision(image, self._contrast)
         image = F.adjust_brightness_torchvision(image, self._brightness)
         return image
 

@@ -11,7 +11,7 @@ from agx_core.models.mobilenet_v3 import InvertedResidualBlock
 from agx_core.models.reversed_autoencoder.base import BaseDecoder
 from agx_core.models.reversed_autoencoder.layers import *
 from agx_core.models.reversed_autoencoder._spatial import *
-from agx_core.layers import Sequential
+from agx_core.layers import Sequential, Upsample2x
 
 
 @keras.saving.register_keras_serializable(
@@ -72,7 +72,7 @@ class MobileNetV3SmallDecoder(BaseDecoder):
         ch_axis = _channel_axis()
         out_ch = self.target_shape[ch_axis]
 
-        self.concat = keras.layers.Concatenate(ch_axis)
+        self.concat = layers.Concatenate(ch_axis)
 
         self.stem = Sequential(
             layers.Conv2D(576, 1, padding="same", use_bias=False),
@@ -87,7 +87,7 @@ class MobileNetV3SmallDecoder(BaseDecoder):
                 # 7->14
                 InvertedResidualBlock(96, 6, 5, activation="hard_swish", expand=False),
                 InvertedResidualBlock(96, 6, 5, activation="hard_swish"),
-                layers.UpSampling2D(),
+                Upsample2x(),
                 InvertedResidualBlock(96, 6, 5, activation="hard_swish"),
                 layers.SpatialDropout2D(0.2),
                 name="stage_0",
@@ -98,7 +98,7 @@ class MobileNetV3SmallDecoder(BaseDecoder):
                 InvertedResidualBlock(40, 6, 5, activation="hard_swish"),
                 InvertedResidualBlock(48, 3, 5, activation="hard_swish"),
                 InvertedResidualBlock(48, 3, 5, activation="hard_swish"),
-                layers.UpSampling2D(),
+                Upsample2x(),
                 InvertedResidualBlock(40, 4, 5, activation="hard_swish"),
                 layers.SpatialDropout2D(0.15),
                 name="stage_1",
@@ -106,21 +106,21 @@ class MobileNetV3SmallDecoder(BaseDecoder):
             Sequential(
                 # 28->56
                 InvertedResidualBlock(24, 88.0 / 24, se_ratio=0.0),
-                layers.UpSampling2D(),
+                Upsample2x(),
                 InvertedResidualBlock(24, 72.0 / 24, se_ratio=0.0),
                 layers.SpatialDropout2D(0.1),
                 name="stage_2",
             ),
             Sequential(
                 # 56->112
-                layers.UpSampling2D(),
+                Upsample2x(),
                 InvertedResidualBlock(16, 1.0),
                 layers.SpatialDropout2D(0.05),
                 name="stage_3",
             ),
             Sequential(
                 # 112->224
-                layers.UpSampling2D(),
+                Upsample2x(),
                 layers.Conv2D(16, 3, padding="same", use_bias=False),
                 layers.BatchNormalization(ch_axis, epsilon=1e-3, momentum=0.999),
                 layers.Activation("hard_swish"),
@@ -147,8 +147,8 @@ class MobileNetV3SmallDecoder(BaseDecoder):
             self._alpha = 1.0
 
         # Bilinear 2× for fade-in blending
-        self._fade_upsample = keras.layers.UpSampling2D(
-            size=2, interpolation="bilinear", name="upsampling"
+        self._fade_upsample = layers.UpSampling2D(
+            size=2, interpolation="bilinear", name="fade_upsampling"
         )
 
         self.concat.build([x_shape, c_shape])
