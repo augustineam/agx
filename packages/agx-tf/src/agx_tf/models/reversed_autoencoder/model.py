@@ -1,21 +1,19 @@
 import os
 
-os.environ["KERAS_BACKEND"] = "torch"
+os.environ["KERAS_BACKEND"] = "tensorflow"
 
 import keras
-import torch
+import tensorflow as tf
 
 from typing import Dict, Any
 
-from agx_core.models.reversed_autoencoder import ReversedAutoencoderBase
 from agx_core.models.reversed_autoencoder.base import BaseEncoder, BaseDecoder
-from agx_torch.models.reversed_autoencoder.layers import Reparameterization
+from agx_core.models.reversed_autoencoder.layers import Reparameterization
+from agx_core.models.reversed_autoencoder import ReversedAutoencoderBase
 
 
-@keras.saving.register_keras_serializable(
-    package="agx_torch.models.reversed_autoencoder"
-)
-class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
+@keras.saving.register_keras_serializable(package="agx_tf.models.reversed_autoencoder")
+class ReversedAutoencoder(ReversedAutoencoderBase):
 
     encoder: BaseEncoder
     decoder: BaseDecoder
@@ -50,30 +48,26 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
             if self.freeze_backbone and hasattr(self.encoder, "train_backbone"):
                 self.encoder.train_backbone(False)
 
-            self.zero_grad()
-            loss, aux_outputs, metric_updates = self.compute_encoder_loss(
-                real, noise, condition
+            with tf.GradientTape() as tape:
+                loss, aux_outputs, metric_updates = self.compute_encoder_loss(
+                    real, noise, condition
+                )
+
+            grads = tape.gradient(loss, self.encoder.trainable_variables)
+            self.enc_optimizer.apply_gradients(
+                zip(grads, self.encoder.trainable_variables)
             )
-            loss.backward()
-
-            # Access .module if DDP-wrapped, otherwise use directly
-            enc = (
-                self.encoder.module if hasattr(self.encoder, "module") else self.encoder
-            )
-
-            trainable_vars = enc.trainable_variables
-            grads = [v.value.grad for v in trainable_vars]
-
-            with torch.no_grad():
-                self.enc_optimizer.apply(grads, trainable_vars)
 
             self.update_step_metrics(metric_updates)
         else:
-            with torch.no_grad():
-                _, aux_outputs, metric_updates = self.compute_encoder_loss(
-                    real, noise, condition
-                )
+            self.encoder.trainable = False
+            self.decoder.trainable = False
+
+            _, aux_outputs, metric_updates = self.compute_encoder_loss(
+                real, noise, condition
+            )
             self.update_step_metrics(metric_updates)
+
         return aux_outputs
 
     def train_decoder(self, real, noise, condition, z_real, embeds_real, kld_real):
@@ -81,28 +75,24 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
             self.encoder.trainable = False
             self.decoder.trainable = True
 
-            self.zero_grad()
-            loss, metric_updates = self.compute_decoder_loss(
-                real, noise, condition, z_real, embeds_real, kld_real
+            with tf.GradientTape() as tape:
+                loss, metric_updates = self.compute_decoder_loss(
+                    real, noise, condition, z_real, embeds_real, kld_real
+                )
+
+            grads = tape.gradient(loss, self.decoder.trainable_variables)
+            self.dec_optimizer.apply_gradients(
+                zip(grads, self.decoder.trainable_variables)
             )
-            loss.backward()
-
-            dec = (
-                self.decoder.module if hasattr(self.decoder, "module") else self.decoder
-            )
-
-            trainable_vars = dec.trainable_variables
-            grads = [v.value.grad for v in trainable_vars]
-
-            with torch.no_grad():
-                self.dec_optimizer.apply(grads, trainable_vars)
 
             self.update_step_metrics(metric_updates)
         else:
-            with torch.no_grad():
-                _, metric_updates = self.compute_decoder_loss(
-                    real, noise, condition, z_real, embeds_real, kld_real
-                )
+            self.encoder.trainable = False
+            self.decoder.trainable = False
+
+            _, metric_updates = self.compute_decoder_loss(
+                real, noise, condition, z_real, embeds_real, kld_real
+            )
             self.update_step_metrics(metric_updates)
 
     @classmethod

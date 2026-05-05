@@ -10,7 +10,7 @@ from .layers import Reparameterization
 from agx_core.helpers import _channel_axis
 
 
-def kl_divergence(mean, logvar):
+def kl_divergence(mean, logvar, cap=10.0):
     """Closed-form KLD from N(mean, exp(logvar)) to N(0, I), per spatial position.
 
     With a spatial latent (B, H, W, C), this returns a (B, H, W) map where
@@ -25,10 +25,11 @@ def kl_divergence(mean, logvar):
     Returns:
         KLD map of shape (B, H, W) — mean over channels, spatial preserved.
     """
-    return 0.5 * ops.mean(
+    kld = 0.5 * ops.mean(
         ops.square(mean) + ops.exp(logvar) - logvar - 1.0,
         axis=_channel_axis(),
     )
+    return ops.minimum(kld, cap)
 
 
 # def embedding_loss(
@@ -413,9 +414,9 @@ class ReversedAutoencoderBase(Model):
 
         loss = ops.mean(-elbo_real + 0.5 * (expelbo_rec + expelbo_fake))
 
-        # Track KLD gap between fake and real samples as an adversarial
+        # Track KLD gap between decoder's (fake + rec) / 2 and real samples as an adversarial
         # equilibrium diagnostic:
-        #   diff_kld = kld_fake - kld_real
+        #   diff_kld = 0.5 * (kld_fake + kld_rec) - kld_real
         #
         #   > 0 (large): Encoder dominates — fakes need far more specialized
         #                encodings than reals. Decoder is underperforming.
@@ -432,6 +433,8 @@ class ReversedAutoencoderBase(Model):
             ops.stop_gradient(kld_real),
         )
 
+        diff_kld = 0.5 * (kld_fake + kld_rec) - kld_real
+
         metric_updates = dict(
             loss_enc=loss,
             loss_rec=-logpx_z_real,
@@ -443,7 +446,7 @@ class ReversedAutoencoderBase(Model):
             elbo_fake=elbo_fake,
             expelbo_rec=expelbo_rec,
             expelbo_fake=expelbo_fake,
-            diff_kld=kld_fake - kld_real,
+            diff_kld=diff_kld,
         )
 
         return loss, aux_outputs, metric_updates
@@ -517,14 +520,14 @@ class ReversedAutoencoderBase(Model):
             pixel_mse(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
         )
         kld_rec = ops.mean(kl_divergence(mean_rec, logvar_rec), axis=[1, 2])
-        elbo_rec = logpx_z_rec - self.beta_kld * kld_rec
+        elbo_rec = logpx_z_rec - self.beta_kld * ops.stop_gradient(kld_rec)
 
         # [N], [N], [N], [N], [N]
         logpx_z_fake = -ops.mean(
             pixel_mse(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
         )
         kld_fake = ops.mean(kl_divergence(mean_fake, logvar_fake), axis=[1, 2])
-        elbo_fake = logpx_z_fake - self.beta_kld * kld_fake
+        elbo_fake = logpx_z_fake - self.beta_kld * ops.stop_gradient(kld_fake)
 
         loss = ops.mean(
             -elbo_real - 0.5 * (elbo_rec + elbo_fake) + self.lambda_embed * embed_loss
@@ -664,14 +667,10 @@ class ReversedAutoencoderBase(Model):
         logpx_z_real = -ops.mean(pixel_mse(real, rec_real), axis=[1, 2])
         elbo_real = logpx_z_real - self.beta_kld * kld_real
 
-        logpx_z_rec = -ops.mean(
-            pixel_mse(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
-        )
+        logpx_z_rec = -ops.mean(pixel_mse(rec_real, rec_rec), axis=[1, 2])
         elbo_rec = logpx_z_rec - self.beta_kld * kld_rec
 
-        logpx_z_fake = -ops.mean(
-            pixel_mse(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
-        )
+        logpx_z_fake = -ops.mean(pixel_mse(fake, rec_fake), axis=[1, 2])
         elbo_fake = logpx_z_fake - self.beta_kld * kld_fake
 
         # [N], [N]
@@ -695,7 +694,7 @@ class ReversedAutoencoderBase(Model):
         self.kld_real_tracker.update_state(kld_real)
         self.kld_rec_tracker.update_state(kld_rec)
         self.kld_fake_tracker.update_state(kld_fake)
-        self.diff_kld_tracker.update_state(kld_fake - kld_real)
+        self.diff_kld_tracker.update_state(0.5 * (kld_fake + kld_rec) - kld_real)
 
         return dict(
             elbo_real=self.elbo_real_tracker.result(),

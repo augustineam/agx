@@ -29,6 +29,8 @@ class MobileNetV3SmallDecoder(BaseDecoder):
         target_shape: Sequence[int] = (224, 224, 1),
         rgb_activation: str = "tanh",
         progressive: bool = False,
+        initial_stage: int | None = None,
+        initial_alpha: float | None = None,
         name: str = "mbnetv3_decoder",
         **kwargs,
     ):
@@ -38,6 +40,8 @@ class MobileNetV3SmallDecoder(BaseDecoder):
 
         self.rgb_activation = rgb_activation
         self.progressive = progressive
+        self._initial_stage = initial_stage
+        self._initial_alpha = initial_alpha
 
     @property
     def current_stage(self) -> int:
@@ -100,27 +104,34 @@ class MobileNetV3SmallDecoder(BaseDecoder):
                 InvertedResidualBlock(48, 3, 5, activation="hard_swish"),
                 Upsample2x(),
                 InvertedResidualBlock(40, 4, 5, activation="hard_swish"),
+                InvertedResidualBlock(40, 4, 5, activation="hard_swish"),
                 layers.SpatialDropout2D(0.15),
                 name="stage_1",
             ),
             Sequential(
                 # 28->56
-                InvertedResidualBlock(24, 88.0 / 24, se_ratio=0.0),
+                InvertedResidualBlock(24, 4, 3, activation="hard_swish"),
+                InvertedResidualBlock(24, 4, 3, activation="hard_swish"),
                 Upsample2x(),
-                InvertedResidualBlock(24, 72.0 / 24, se_ratio=0.0),
+                InvertedResidualBlock(24, 3, 3, activation="hard_swish"),
+                InvertedResidualBlock(24, 3, 3, activation="hard_swish"),
                 layers.SpatialDropout2D(0.1),
                 name="stage_2",
             ),
             Sequential(
                 # 56->112
+                InvertedResidualBlock(24, 3, 3, activation="hard_swish"),
                 Upsample2x(),
-                InvertedResidualBlock(16, 1.0),
+                InvertedResidualBlock(16, 2, 3, activation="hard_swish"),
+                InvertedResidualBlock(16, 2, 3, activation="hard_swish"),
                 layers.SpatialDropout2D(0.05),
                 name="stage_3",
             ),
             Sequential(
                 # 112->224
                 Upsample2x(),
+                InvertedResidualBlock(16, 2, 3, activation="hard_swish"),
+                InvertedResidualBlock(16, 2, 3, activation="hard_swish"),
                 layers.Conv2D(16, 3, padding="same", use_bias=False),
                 layers.BatchNormalization(ch_axis, epsilon=1e-3, momentum=0.999),
                 layers.Activation("hard_swish"),
@@ -139,7 +150,11 @@ class MobileNetV3SmallDecoder(BaseDecoder):
                 )
             )
 
-        if self.progressive:
+        if self._initial_stage is not None:
+            # Restoring from serialized state (mid-growth or fully grown)
+            self._current_stage = self._initial_stage
+            self._alpha = self._initial_alpha if self._initial_alpha is not None else 1.0
+        elif self.progressive:
             self._current_stage = 0
             self._alpha = 1.0
         else:
@@ -227,6 +242,8 @@ class MobileNetV3SmallDecoder(BaseDecoder):
             {
                 "rgb_activation": self.rgb_activation,
                 "progressive": self.progressive,
+                "initial_stage": self._current_stage,
+                "initial_alpha": self._alpha,
             }
         )
         return config

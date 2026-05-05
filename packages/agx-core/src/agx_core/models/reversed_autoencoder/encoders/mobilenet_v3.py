@@ -22,6 +22,8 @@ class MobileNetV3SmallEncoder(BaseEncoder):
         latent_size: int = 512,
         progressive: bool = False,
         rgb_activation: str = "tanh",
+        initial_stage: int | None = None,
+        initial_alpha: float | None = None,
         name: str = "mbnetv3_encoder",
         **kwargs,
     ):
@@ -30,6 +32,8 @@ class MobileNetV3SmallEncoder(BaseEncoder):
         )
         self.progressive = progressive
         self.rgb_activation = rgb_activation
+        self._initial_stage = initial_stage
+        self._initial_alpha = initial_alpha
 
     @property
     def current_stage(self) -> int:
@@ -137,7 +141,11 @@ class MobileNetV3SmallEncoder(BaseEncoder):
                 )
             )
 
-        if self.progressive:
+        if self._initial_stage is not None:
+            # Restoring from serialized state (mid-growth or fully grown)
+            self._current_stage: int = self._initial_stage
+            self._alpha: float = self._initial_alpha if self._initial_alpha is not None else 1.0
+        elif self.progressive:
             self._current_stage: int = 0
             self._alpha: float = 1.0
         else:
@@ -254,6 +262,8 @@ class MobileNetV3SmallEncoder(BaseEncoder):
             dict(
                 progressive=self.progressive,
                 rgb_activation=self.rgb_activation,
+                initial_stage=self._current_stage,
+                initial_alpha=self._alpha,
             )
         )
         return config

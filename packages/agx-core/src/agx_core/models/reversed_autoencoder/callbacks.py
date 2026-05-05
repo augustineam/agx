@@ -151,9 +151,6 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
         )
 
 
-# ... existing code ...
-
-
 @keras.saving.register_keras_serializable(
     package="agx_core.models.reversed_autoencoder"
 )
@@ -381,8 +378,13 @@ class ProgressiveGrowingCallback(keras.callbacks.Callback):
         if dec.is_fully_grown:
             return
 
-        self._phase_step += 1
         self._total_steps += 1
+
+        # Pause progressive schedule while equilibrium has one side frozen
+        if not (self.model.train_encoder_enabled and self.model.train_decoder_enabled):
+            return
+
+        self._phase_step += 1
 
         if self._phase == "stabilize":
             if self._phase_step >= self.stabilize_steps:
@@ -394,7 +396,7 @@ class ProgressiveGrowingCallback(keras.callbacks.Callback):
                     if self.verbose:
                         print(
                             f"\n[ProGrow] Step {self._total_steps}: "
-                            f"Fully grown — switching to full head_block + head_conv path"
+                            f"Fully grown — switching to full network path"
                         )
                     return
 
