@@ -26,6 +26,7 @@ dependencies = [
     { name = "ipykernel" },
     { name = "ipywidgets" },
     { name = "labelme" },
+    { name = "mlflow" },
     { name = "nbformat" },
 ]
 
@@ -35,6 +36,7 @@ requires-dist = [
     { name = "ipykernel", specifier = ">=7.2.0" },
     { name = "ipywidgets", specifier = ">=8.1.8" },
     { name = "labelme", specifier = ">=6.1.2" },
+    { name = "mlflow", specifier = ">=3.11.1" },
     { name = "nbformat", specifier = ">=5.10.4" },
 ]
 
@@ -49,7 +51,6 @@ dependencies = [
     { name = "jax" },
     { name = "joblib" },
     { name = "keras" },
-    { name = "mlflow" },
     { name = "numpy" },
     { name = "omegaconf" },
     { name = "onnx" },
@@ -74,7 +75,6 @@ requires-dist = [
     { name = "jax", specifier = ">=0.9.2" },
     { name = "joblib", specifier = ">=1.5.3" },
     { name = "keras", specifier = ">=3.14.0" },
-    { name = "mlflow", specifier = ">=3.11.1" },
     { name = "numpy", specifier = ">=2.4.4" },
     { name = "omegaconf", specifier = ">=2.3.0" },
     { name = "onnx", specifier = ">=1.21.0" },
@@ -626,10 +626,10 @@ wheels = [
 
 [[package]]
 name = "cuda-pathfinder"
-version = "1.5.3"
+version = "1.5.4"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d3/d6/ac63065d33dd700fee7ebd7d287332401b54e31b9346e142f871e1f0b116/cuda_pathfinder-1.5.3-py3-none-any.whl", hash = "sha256:dff021123aedbb4117cc7ec81717bbfe198fb4e8b5f1ee57e0e084fec5c8577d", size = 49991, upload-time = "2026-04-14T20:09:27.037Z" },
+    { url = "https://files.pythonhosted.org/packages/11/d0/c177e29701cf1d3008d7d2b16b5fc626592ce13bd535f8795c5f57187e0e/cuda_pathfinder-1.5.4-py3-none-any.whl", hash = "sha256:9563d3175ce1828531acf4b94e1c1c7d67208c347ca002493e2654878b26f4b7", size = 51657, upload-time = "2026-04-27T22:42:07.712Z" },
 ]
 
 [[package]]
@@ -927,11 +927,11 @@ wheels = [
 
 [[package]]
 name = "fsspec"
-version = "2026.3.0"
+version = "2026.4.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e1/cf/b50ddf667c15276a9ab15a70ef5f257564de271957933ffea49d2cdbcdfb/fsspec-2026.3.0.tar.gz", hash = "sha256:1ee6a0e28677557f8c2f994e3eea77db6392b4de9cd1f5d7a9e87a0ae9d01b41", size = 313547, upload-time = "2026-03-27T19:11:14.892Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d5/8d/1c51c094345df128ca4a990d633fe1a0ff28726c9e6b3c41ba65087bba1d/fsspec-2026.4.0.tar.gz", hash = "sha256:301d8ac70ae90ef3ad05dcf94d6c3754a097f9b5fe4667d2787aa359ec7df7e4", size = 312760, upload-time = "2026-04-29T20:42:38.635Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d5/1f/5f4a3cd9e4440e9d9bc78ad0a91a1c8d46b4d429d5239ebe6793c9fe5c41/fsspec-2026.3.0-py3-none-any.whl", hash = "sha256:d2ceafaad1b3457968ed14efa28798162f1638dbb5d2a6868a2db002a5ee39a4", size = 202595, upload-time = "2026-03-27T19:11:13.595Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/0c/043d5e551459da400957a1395e0febbf771446ff34291afcbe3d8be2a279/fsspec-2026.4.0-py3-none-any.whl", hash = "sha256:11ef7bb35dab8a394fde6e608221d5cf3e8499401c249bebaeaad760a1a8dec2", size = 203402, upload-time = "2026-04-29T20:42:36.842Z" },
 ]
 
 [[package]]
@@ -3755,7 +3755,7 @@ wheels = [
 
 [[package]]
 name = "ultralytics"
-version = "8.4.41"
+version = "8.4.46"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "matplotlib" },
@@ -3771,22 +3771,22 @@ dependencies = [
     { name = "torchvision" },
     { name = "ultralytics-thop" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e3/c3/6ec43edbb8b03a69788e200fcd046d51b2b8c9c6095c96661aa9549939d0/ultralytics-8.4.41.tar.gz", hash = "sha256:1ccc3f5f3e7ee890bc1043f8f0e69e5ada3e80211575ae96fb4ea42ba1d18dc8", size = 1036783, upload-time = "2026-04-21T13:43:28.956Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/83/f4c346113f2d3a18752bc7da334387f284946d28070f4a89e671f653a6af/ultralytics-8.4.46.tar.gz", hash = "sha256:582392e0d75e1757e6e82d90d6eeabb0d1710b0e56f49227825855ecf54dda30", size = 1038389, upload-time = "2026-05-01T20:01:47.395Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/46/6f/61f316a7306d1462aa4cc565a3a4423b22d88ed206a9ce1444b40c14dc91/ultralytics-8.4.41-py3-none-any.whl", hash = "sha256:c1bf0209f0df2e688da48aaacda1ac1df68611723d657e1544edfca1583657f8", size = 1228465, upload-time = "2026-04-21T13:43:24.707Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/1a/5bfdb77dc86bb06fa7cd19d2e05a91cb787fa6d5a3093284f9bbd819dbcf/ultralytics-8.4.46-py3-none-any.whl", hash = "sha256:87982e71fad96424ef0356eb2d1a7a32526051c404089e979634322dc3ba4156", size = 1230103, upload-time = "2026-05-01T20:01:42.392Z" },
 ]
 
 [[package]]
 name = "ultralytics-thop"
-version = "2.0.18"
+version = "2.0.19"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "torch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1f/63/21a32e1facfeee245dbdfb7b4669faf7a36ff7c00b50987932bdab126f4b/ultralytics_thop-2.0.18.tar.gz", hash = "sha256:21103bcd39cc9928477dc3d9374561749b66a1781b35f46256c8d8c4ac01d9cf", size = 34557, upload-time = "2025-10-29T16:58:13.526Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/09/ab/1cc7edfd5241ed9abb2e8ee0d5088d2800c989df9baa43e05706a87f765b/ultralytics_thop-2.0.19.tar.gz", hash = "sha256:df547d93ebdec4c9d2a9375f2e21d483547a462c08814e8810dc73498dd29ba9", size = 34665, upload-time = "2026-04-24T12:21:23.844Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7f/c7/fb42228bb05473d248c110218ffb8b1ad2f76728ed8699856e5af21112ad/ultralytics_thop-2.0.18-py3-none-any.whl", hash = "sha256:2bb44851ad224b116c3995b02dd5e474a5ccf00acf237fe0edb9e1506ede04ec", size = 28941, upload-time = "2025-10-29T16:58:12.093Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/74/af3e40919305f16968ea3ab88d84b511d710dd281eb5dafaf4897579dd22/ultralytics_thop-2.0.19-py3-none-any.whl", hash = "sha256:a180baeb3b83f0f2ad3f3572338cef406b221a57c6d10ca09cfd90f9c892a739", size = 28952, upload-time = "2026-04-24T12:21:22.207Z" },
 ]
 
 [[package]]

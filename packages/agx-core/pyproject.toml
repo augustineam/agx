@@ -1,7 +1,7 @@
 [project]
 name = "agx-core"
 version = "0.1.0"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "albumentationsx>=2.2.6",
     "click>=8.3.2",
@@ -9,7 +9,6 @@ dependencies = [
     "jax>=0.9.2",
     "joblib>=1.5.3",
     "keras>=3.14.0",
-    "mlflow>=3.11.1",
     "numpy>=2.4.4",
     "omegaconf>=2.3.0",
     "onnx>=1.21.0",

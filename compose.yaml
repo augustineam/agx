@@ -1,0 +1,51 @@
+services:
+  agx:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - datasets:/datasets
+      - mlflow:/mlflow
+      - ./:/agx
+    working_dir: /agx
+    environment:
+      - TF_CPP_MIN_LOG_LEVEL=3
+      - MLFLOW_ENABLE_ASYNC_LOGGING=true
+      - MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING=true
+      - MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL=12
+      - MLFLOW_SYSTEM_METRICS_SAMPLES_BEFORE_LOGGING=5
+      - MLFLOW_TRACKING_USERNAME=aavila
+      - MLFLOW_TRACKING_URI=http://localhost:5000
+      - SM_MODEL_DIR=/agx/cache
+      - SM_CHANNEL_FOS=/datasets/patches
+      - SM_CHANNEL_TEST=/datasets/tfrecords/tests
+      - SM_CHANNEL_DATA=/datasets/tfrecords/products
+    ports:
+      - "5000:5000"
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    shm_size: '2gb'  # Increase shared memory from default 64MB
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  datasets:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: /run/media/augus/Storage/datasets/kanan/datasets
+
+  mlflow:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: /run/media/augus/Storage/mlflow
