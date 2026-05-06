@@ -865,7 +865,128 @@ When tuning:
 
 ---
 
-## 10. Data Augmentation Rationale
+## 10. X-Ray Data Representation & Preprocessing
+
+### The Physical Model
+
+X-ray image formation follows the Beer-Lambert law:
+
+$$I = I_0 \cdot \exp(-\mu \cdot t)$$
+
+Where $I_0$ is the source intensity, $\mu$ is the linear attenuation coefficient
+(material property), and $t$ is the material thickness. The raw pixel value is
+**exponentially** related to the physical quantity of interest (total attenuation
+$\mu \cdot t$).
+
+This exponential relationship creates a fundamental problem: the same foreign object
+(fixed $\Delta\mu$) produces **different pixel-space contrast** depending on what's
+behind it:
+
+- FO behind thin content (low background attenuation): large $\Delta I$
+- FO behind thick glass (high background attenuation): small $\Delta I$
+
+In pixel space, anomaly signal is inconsistent. The model must implicitly learn
+the exponential inverse to detect anomalies uniformly — wasting capacity on a
+task that can be solved analytically.
+
+### Log Transform: Linearizing Attenuation
+
+The log transform converts exponential intensity to linear attenuation space:
+
+$$-\log(I / I_0) = \mu \cdot t$$
+
+After log-linearization:
+
+- Material density differences become **additive and linear**
+- A foreign object with attenuation $\Delta\mu$ produces a **constant offset**
+  regardless of background density
+- The reconstruction task is "fairer" — the model operates in a space where
+  differences are physically meaningful and uniform
+
+Applied as the first preprocessing step (before any brightness/contrast/normalization):
+
+```python
+# LogTransform: linearize X-ray attenuation
+log_image = log(255 + ε) - log(image + ε)  # invert for transmission X-ray
+# Rescale to [0, 255] for downstream transforms
+log_image = (log_image - min) / (max - min) * 255
+```
+
+The `invert=True` mode ensures high attenuation (dense material) maps to high pixel
+value, matching the convention where foreign objects appear bright.
+
+### Brightness Adjustment
+
+After log-linearization, brightness adjustment (`+20` on [0, 255]) shifts the
+working range:
+
+- Makes background (low density, low pixel value) less dark
+- Preserves high-density regions (glass edges, metal caps)
+- In the normalized [-1, 1] space: expands the gap between content (~0) and
+  dense structures (~0.8–0.9)
+
+Critically, brightness in log-space has **uniform effect** across the image
+(unlike raw exponential space where +20 means different things at different densities).
+
+### Sigmoidal Contrast (For Specific Density Bands)
+
+When content and foreign objects occupy a similar intensity band (e.g., both in
+0.5–0.9 after normalization), standard gamma correction is suboptimal:
+
+- $\gamma < 1$: expands shadows, **compresses** the 0.5–0.9 band of interest ❌
+- $\gamma > 1$: expands highlights but darkens everything
+
+Sigmoidal contrast applies a steep S-curve centered on the band of interest:
+
+$$S(x) = \frac{1}{1 + \exp(-g \cdot (x - c))}$$
+
+Where $c$ is the center intensity (e.g., 0.7 for mid-content) and $g$ controls
+steepness. This expands contrast **precisely** where FOs and content overlap,
+maximizing their pixel-space separation without distorting other regions.
+
+### Preprocessing Order
+
+```
+Raw X-ray [0, 255]
+  → LogTransform (linearize attenuation)      ← physically motivated
+  → BrightnessAdjust (+20)                     ← shift working range
+  → [Optional: SigmoidalContrast(center=0.7)]  ← expand FO/content band
+  → InvertImg                                  ← convention: dense = bright
+  → Resize
+  → Normalize (mean=0.5, std=0.5) → [-1, 1]   ← model input range
+```
+
+### Impact on Anomaly Detection
+
+Preprocessing that makes normal reconstruction slightly harder but anomalies
+**much** more evident is a net win:
+
+- Without log transform: FO behind glass produces ΔI = 5 in raw space
+- With log transform: same FO produces Δ(log I) = constant everywhere
+
+The signal-to-noise ratio for anomaly detection improves because:
+1. Reconstruction error at anomaly locations increases more than baseline error
+2. The model doesn't waste capacity learning the exponential inverse
+3. Spatial curriculum focuses gradient on structural regions where linearized
+   anomaly contrast is now consistent
+
+### Interaction with Spatial Curriculum
+
+Log transform and spatial curriculum are **complementary**:
+
+- **Log transform**: Makes the *data* more linearly separable (FOs produce
+  consistent contrast regardless of position)
+- **Spatial curriculum**: Makes the *loss* focus on structurally complex regions
+  (where the now-consistent FO signal lives)
+
+Without log transform, spatial curriculum amplifies reconstruction errors that
+vary in magnitude across the image (same FO, different contrast). With log
+transform, the amplified errors have consistent physical meaning — the model
+learns a uniform normal manifold.
+
+---
+
+## 11. Data Augmentation Rationale
 
 Robust augmentations (rotation, illumination, contrast) are applied despite being
 unlikely in production. The reasoning:
@@ -885,9 +1006,24 @@ The trade-off is that aggressive augmentations make reconstruction harder (the
 decoder must reproduce augmented versions, not just canonical views), which is why
 decoder architecture capacity matters.
 
+### Augmentation vs Fixed Preprocessing
+
+A key distinction:
+
+- **Fixed preprocessing** (log transform, brightness): Always applied identically
+  at train and inference. Maximizes signal quality. The model always sees the
+  same representation.
+- **Random augmentation** (rotation, affine, blur): Applied stochastically during
+  training only. Builds invariance. The model learns to handle variation.
+
+For anomaly detection specifically: fixed preprocessing that maximizes anomaly
+contrast is always beneficial. Random augmentation of contrast/brightness is
+beneficial for robustness but should NOT be applied to the log transform or
+normalization steps.
+
 ---
 
-## 11. Design Decisions Considered & Rejected
+## 12. Design Decisions Considered & Rejected
 
 | Idea                                | Verdict     | Reason                                                                                  |
 | ----------------------------------- | ----------- | --------------------------------------------------------------------------------------- |
@@ -895,9 +1031,49 @@ decoder architecture capacity matters.
 | `expelbo_real` in encoder           | ❌          | Curriculum on fitting term reduces signal when reals are bad = wrong direction          |
 | `expelbo_real` in decoder           | ❌          | Neglects easy samples → reconstruction drift → false positive anomalies at inference    |
 | Per-sample curriculum on embed_loss | ❌          | Feature space has natural importance weighting; spatial curriculum addresses root cause |
+| SSIM as primary reconstruction loss | ❌          | Window-based → blurs spatial resolution; partially redundant with embedding loss (§2)   |
 | Skip connections (encoder→decoder)  | ❌          | Leaks anomalous features, suppresses anomaly signal                                     |
 | Sum reduction in losses             | ❌ Replaced | Resolution-dependent magnitudes; hard to interpret/tune                                 |
 | `log_normal_pdf` for KLD            | ❌ Replaced | Monte Carlo estimate with variance; closed form is exact and cheaper                    |
 | Diffusion decoder                   | ❌          | Multiple denoising steps kills CPU real-time inference                                  |
 | ViT encoder                         | ❌          | Slower on CPU than MobileNet; no natural multi-scale features for spatial anomaly maps  |
 | Standard ConvTranspose upsampling   | ❌ Replaced | Checkerboard artifacts waste decoder capacity                                           |
+| Standard contrast (at grayscale mean) | ❌        | Operates at mean intensity; compresses the high-density band where FOs live             |
+
+### Why MSE (Not SSIM) for `logpx_z`
+
+SSIM (Structural Similarity Index) was considered as an alternative or complement
+to MSE for the reconstruction term. While SSIM has appealing properties for
+perceptual quality (luminance + contrast + structure decomposition), it was rejected
+for the reconstruction loss:
+
+1. **Window-based computation blurs spatial precision**: SSIM operates in 11×11
+   local windows, averaging structural similarity over patches. This directly
+   counteracts the spatial curriculum's purpose — fine-grained per-pixel focus
+   on hard regions. A pixel-level error at coordinates (h, w) gets smeared over
+   its 11×11 neighborhood in SSIM space.
+
+2. **Partially redundant with embedding loss**: SSIM captures "does this region
+   look structurally similar?" — the same signal the embedding loss provides in
+   learned feature space. The embedding loss is strictly more powerful (learned,
+   multi-scale, adapted to the encoder's actual representations) while SSIM is
+   a fixed handcrafted heuristic.
+
+3. **Gradient landscape issues**: SSIM has known gradient plateaus when images
+   are already reasonably similar (the denominator stabilization terms $c_1$, $c_2$
+   flatten gradients near SSIM ≈ 1). MSE provides consistent gradient magnitude
+   regardless of current similarity level — critical for continued improvement.
+
+4. **Interaction with spatial curriculum**: MSE produces a clean per-pixel error
+   map that the spatial curriculum can precisely weight. SSIM's window-based output
+   would require a different weighting strategy.
+
+The architecture already achieves structural reconstruction fidelity through:
+- **Spatial curriculum** on MSE → pixel-level structural focus
+- **Embedding loss** → learned perceptual/structural fidelity
+- **Log preprocessing** → linearized intensity makes MSE physically meaningful
+
+Adding SSIM would be a third structural signal with diminishing returns and
+engineering cost. If a future ablation shows `loss_rec` low but anomaly maps
+blurry (MSE is good but structures are shifted), MS-SSIM as an auxiliary loss
+term (not replacing MSE) could be reconsidered.
