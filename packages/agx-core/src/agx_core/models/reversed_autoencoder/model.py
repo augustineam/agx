@@ -51,8 +51,36 @@ def embedding_loss(
     return scale * total_loss
 
 
-def pixel_mse(y_true, y_pred):
-    return ops.mean(ops.square(y_true - y_pred), axis=_channel_axis())
+def pixel_mse(y_true, y_pred, spatial_temperature: float = 0.0):
+    """Per-pixel MSE with optional spatial curriculum weighting.
+
+    When spatial_temperature > 0, hard-to-reconstruct regions receive
+    exponentially more gradient attention. Critical for information-sparse
+    images (single-channel X-rays) where uniform background dominates
+    the spatial mean.
+
+    Args:
+        y_true: Ground truth [B, H, W, C]
+        y_pred: Prediction [B, H, W, C]
+        spatial_temperature: Curriculum sharpness. 0 = uniform (original behavior).
+            Recommended range for X-rays: 2.0-10.0
+
+    Returns:
+        Error map [B, H, W]. When temperature > 0, the map is spatially
+        reweighted so that hard regions contribute more to the downstream mean.
+    """
+    error = ops.mean(ops.square(y_true - y_pred), axis=_channel_axis())  # [B, H, W]
+
+    if spatial_temperature <= 0.0:
+        return error
+
+    # Exponential weighting: hard pixels (high error) get more attention
+    # stop_gradient prevents second-order effects (don't optimize weights themselves)
+    weights = ops.exp(spatial_temperature * ops.stop_gradient(error))
+    # Normalize per-sample so overall loss magnitude is preserved
+    weights = weights / ops.mean(weights, axis=[1, 2], keepdims=True)
+
+    return weights * error
 
 
 @keras.saving.register_keras_serializable(
@@ -77,7 +105,9 @@ class ReversedAutoencoderBase(Model):
         decoder: BaseDecoder,
         reparameterize=Reparameterization(),
         beta_kld: float = 0.25,
-        expelbo_temp: float = 1.0,
+        enc_expelbo_temp: float = 1.0,
+        dec_expelbo_temp: float = 1.0,
+        spatial_temperature: float = 1.0,
         lambda_embed: float = 1.0,
         freeze_backbone: bool = True,
         name: str = "reversed_autoencoder",
@@ -90,7 +120,9 @@ class ReversedAutoencoderBase(Model):
         self.reparameterize = reparameterize
         self.freeze_backbone = freeze_backbone
         self.beta_kld = beta_kld
-        self.expelbo_temp = expelbo_temp
+        self.enc_expelbo_temp = enc_expelbo_temp
+        self.dec_expelbo_temp = dec_expelbo_temp
+        self.spatial_temperature = spatial_temperature
         self.lambda_embed = lambda_embed
 
         # Two independent optimizers — set via compile()
@@ -112,8 +144,10 @@ class ReversedAutoencoderBase(Model):
         self.elbo_real_tracker = metrics.Mean("elbo_real")
         self.elbo_rec_tracker = metrics.Mean("elbo_rec")
         self.elbo_fake_tracker = metrics.Mean("elbo_fake")
-        self.expelbo_rec_tracker = metrics.Mean("expelbo_rec")
-        self.expelbo_fake_tracker = metrics.Mean("expelbo_fake")
+        self.expelbo_rec_enc_tracker = metrics.Mean("expelbo_rec_enc")
+        self.expelbo_fake_enc_tracker = metrics.Mean("expelbo_fake_enc")
+        self.expelbo_rec_dec_tracker = metrics.Mean("expelbo_rec_dec")
+        self.expelbo_fake_dec_tracker = metrics.Mean("expelbo_fake_dec")
 
     @property
     def metrics(self):
@@ -134,8 +168,10 @@ class ReversedAutoencoderBase(Model):
             self.elbo_real_tracker,
             self.elbo_rec_tracker,
             self.elbo_fake_tracker,
-            self.expelbo_rec_tracker,
-            self.expelbo_fake_tracker,
+            self.expelbo_rec_enc_tracker,
+            self.expelbo_fake_enc_tracker,
+            self.expelbo_rec_dec_tracker,
+            self.expelbo_fake_dec_tracker,
         ]
 
     @property
@@ -354,26 +390,30 @@ class ReversedAutoencoderBase(Model):
         Returns:
             (loss, metric_updates) tuple.
         """
-        logpx_z_real = -ops.mean(pixel_mse(real, rec_real), axis=[1, 2])
+        logpx_z_real = -ops.mean(
+            pixel_mse(real, rec_real, self.spatial_temperature), axis=[1, 2]
+        )
         kld_real = ops.mean(kl_divergence(mean_real, logvar_real), axis=[1, 2])
         elbo_real = logpx_z_real - self.beta_kld * kld_real
 
         logpx_z_rec = -ops.mean(
-            pixel_mse(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
+            pixel_mse(ops.stop_gradient(rec_real), rec_rec, self.spatial_temperature),
+            axis=[1, 2],
         )
         kld_rec = ops.mean(kl_divergence(mean_rec, logvar_rec), axis=[1, 2])
         elbo_rec = logpx_z_rec - self.beta_kld * kld_rec
 
         logpx_z_fake = -ops.mean(
-            pixel_mse(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
+            pixel_mse(ops.stop_gradient(fake), rec_fake, self.spatial_temperature),
+            axis=[1, 2],
         )
         kld_fake = ops.mean(kl_divergence(mean_fake, logvar_fake), axis=[1, 2])
         elbo_fake = logpx_z_fake - self.beta_kld * kld_fake
 
-        expelbo_rec = ops.exp(self.expelbo_temp * elbo_rec)
-        expelbo_fake = ops.exp(self.expelbo_temp * elbo_fake)
+        expelbo_rec_enc = ops.exp(self.enc_expelbo_temp * elbo_rec)
+        expelbo_fake_enc = ops.exp(self.enc_expelbo_temp * elbo_fake)
 
-        loss = ops.mean(-elbo_real + 0.5 * (expelbo_rec + expelbo_fake))
+        loss = ops.mean(-elbo_real + 0.5 * (expelbo_rec_enc + expelbo_fake_enc))
 
         # diff_kld: adversarial equilibrium diagnostic
         #   > 0: encoder dominant, decoder underperforming
@@ -390,8 +430,8 @@ class ReversedAutoencoderBase(Model):
             elbo_real=elbo_real,
             elbo_rec=elbo_rec,
             elbo_fake=elbo_fake,
-            expelbo_rec=expelbo_rec,
-            expelbo_fake=expelbo_fake,
+            expelbo_rec_enc=expelbo_rec_enc,
+            expelbo_fake_enc=expelbo_fake_enc,
             diff_kld=diff_kld,
         )
 
@@ -431,26 +471,40 @@ class ReversedAutoencoderBase(Model):
         """
         embed_loss = embedding_loss(embeds_real, embeds_rec)
 
-        logpx_z_real = -ops.mean(pixel_mse(real, rec_real), axis=[1, 2])
+        logpx_z_real = -ops.mean(
+            pixel_mse(real, rec_real, self.spatial_temperature), axis=[1, 2]
+        )
         elbo_real = logpx_z_real - self.beta_kld * ops.stop_gradient(kld_real)
 
         logpx_z_rec = -ops.mean(
-            pixel_mse(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
+            pixel_mse(ops.stop_gradient(rec_real), rec_rec, self.spatial_temperature),
+            axis=[1, 2],
         )
         kld_rec = ops.mean(kl_divergence(mean_rec, logvar_rec), axis=[1, 2])
         elbo_rec = logpx_z_rec - self.beta_kld * ops.stop_gradient(kld_rec)
 
         logpx_z_fake = -ops.mean(
-            pixel_mse(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
+            pixel_mse(ops.stop_gradient(fake), rec_fake, self.spatial_temperature),
+            axis=[1, 2],
         )
         kld_fake = ops.mean(kl_divergence(mean_fake, logvar_fake), axis=[1, 2])
         elbo_fake = logpx_z_fake - self.beta_kld * ops.stop_gradient(kld_fake)
 
+        expelbo_rec_dec = ops.exp(-self.dec_expelbo_temp * elbo_rec)
+        expelbo_fake_dec = ops.exp(-self.dec_expelbo_temp * elbo_fake)
+
         loss = ops.mean(
-            -elbo_real - 0.5 * (elbo_rec + elbo_fake) + self.lambda_embed * embed_loss
+            -elbo_real
+            + 0.5 * (expelbo_rec_dec + expelbo_fake_dec)
+            + self.lambda_embed * embed_loss
         )
 
-        return loss, dict(loss_dec=loss, loss_embed=embed_loss)
+        return loss, dict(
+            loss_dec=loss,
+            loss_embed=embed_loss,
+            expelbo_rec_dec=expelbo_rec_dec,
+            expelbo_fake_dec=expelbo_fake_dec,
+        )
 
     # ─── Default Forward Orchestration ────────────────────────────────
     #
@@ -697,7 +751,9 @@ class ReversedAutoencoderBase(Model):
                 decoder=keras.saving.serialize_keras_object(self.decoder),
                 reparameterize=keras.saving.serialize_keras_object(self.reparameterize),
                 beta_kld=self.beta_kld,
-                expelbo_temp=self.expelbo_temp,
+                enc_expelbo_temp=self.enc_expelbo_temp,
+                dec_expelbo_temp=self.dec_expelbo_temp,
+                spatial_temperature=self.spatial_temperature,
                 lambda_embed=self.lambda_embed,
                 freeze_backbone=self.freeze_backbone,
             )

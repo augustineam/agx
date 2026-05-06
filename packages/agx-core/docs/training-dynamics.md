@@ -161,7 +161,7 @@ for preservable deep features.
 A middle-ground variant uses **cosine-only for shallow layers** (directional alignment
 is achievable even when magnitude matching is not) and full MSE + cosine for deep layers.
 
-### Pixel MSE
+### Pixel MSE with Spatial Curriculum
 
 Per-pixel reconstruction error reduced along the channel dimension:
 
@@ -169,6 +169,51 @@ $$\text{MSE}_{\text{pixel}}(x, \hat{x}) = \frac{1}{C} \sum_{c=1}^{C} (x_c - \hat
 
 This produces a spatial error map of shape $[B, H, W]$ that preserves spatial
 information for downstream loss aggregation.
+
+#### The Spatial Dilution Problem
+
+Single-channel X-ray images are information-sparse: 70–80% of pixels are
+near-uniform background with trivially low reconstruction error. The spatial
+mean drowns out localized failures in structurally complex regions:
+
+$$\text{mean}_{h,w}[\text{MSE}] \approx 0.8 \times 0.001 + 0.2 \times 0.1 = 0.021$$
+
+Even halving the error on hard regions (0.1 → 0.05) only changes the mean from
+0.021 → 0.011 — a tiny gradient signal. The network reaches low MSE by
+reconstructing uniform regions well while neglecting structural detail.
+
+This creates a cascade: the decoder has no incentive to improve on edges and
+transitions → embedding loss plateaus (features diverge in structural regions) →
+the encoder easily discriminates fakes → encoder dominance → equilibrium
+callback triggers excessively.
+
+#### Spatial Curriculum Weighting
+
+To address this, `pixel_mse` supports exponential spatial curriculum weighting
+controlled by `spatial_temperature` ($\tau_s$):
+
+$$\text{MSE}_{\text{spatial}}(x, \hat{x}) = w_{h,w} \cdot \text{MSE}_{\text{pixel}}(x, \hat{x})$$
+
+where the weights are:
+
+$$w_{h,w} = \frac{\exp\left(\tau_s \cdot \overline{\text{MSE}}_{h,w}\right)}{\text{mean}_{h,w}\left[\exp\left(\tau_s \cdot \overline{\text{MSE}}_{h,w}\right)\right]}$$
+
+and $\overline{\text{MSE}}_{h,w}$ is the stop-gradiented error map (weights are
+treated as constants during backpropagation to prevent second-order effects).
+
+**Key properties:**
+
+- **Per-sample normalization** preserves overall loss magnitude — existing
+  hyperparameters (`beta_kld`, `lambda_embed`) don't need re-tuning.
+- **Stop gradient on weights** prevents the network from minimizing loss by
+  making weights small (producing uniform error) rather than fixing hard regions.
+- At $\tau_s = 0$: reduces to uniform spatial mean (original behavior).
+- At $\tau_s = 5$: structural regions (~0.1 error) get ~1.6× weight vs background.
+- At $\tau_s = 10$: structural regions get ~2.7× weight.
+- At $\tau_s = 20$: structural regions get ~7× weight.
+
+**Applied to both encoder and decoder** — see §3.1 and §4.1 for the distinct
+effects on each component.
 
 ---
 
@@ -180,27 +225,27 @@ It is trained to:
 1. **Maximize ELBO on real data** — build a structured latent space for normal samples
 2. **Minimize ELBO on reconstructions and fakes** — learn to reject decoder outputs
 
-$$\mathcal{L}_{\text{enc}} = \underbrace{-\text{ELBO}_{\text{real}}}_{\text{Fit normal manifold}} + \frac{1}{2} \left( \underbrace{\exp(\tau \cdot \text{ELBO}_{\text{rec}})}_{\text{Reject reconstructions}} + \underbrace{\exp(\tau \cdot \text{ELBO}_{\text{fake}})}_{\text{Reject fakes}} \right)$$
+$$\mathcal{L}_{\text{enc}} = \underbrace{-\text{ELBO}_{\text{real}}}_{\text{Fit normal manifold}} + \frac{1}{2} \left( \underbrace{\exp(\tau_e \cdot \text{ELBO}_{\text{rec}})}_{\text{Reject reconstructions}} + \underbrace{\exp(\tau_e \cdot \text{ELBO}_{\text{fake}})}_{\text{Reject fakes}} \right)$$
 
-### Exponential Curriculum Weighting
+### Exponential Curriculum Weighting (Encoder)
 
 The rejection terms use exponential curriculum weighting (`expelbo`):
 
-$$\widetilde{\text{ELBO}} = \exp(\tau \cdot \text{ELBO})$$
+$$\widetilde{\text{ELBO}} = \exp(\tau_e \cdot \text{ELBO})$$
 
 Since ELBO values are negative (in the $[-2, 0]$ range with mean reductions), this
 creates adaptive curriculum learning:
 
-- **Bad fakes** (ELBO $\approx -2$): $\exp(-2\tau) \approx 0.14$ at $\tau=1$ →
+- **Bad fakes** (ELBO $\approx -2$): $\exp(-2\tau_e) \approx 0.14$ at $\tau_e=1$ →
   low contribution. The encoder already rejects these easily.
 - **Good fakes** (ELBO $\approx 0$): $\exp(0) \approx 1$ →
   high contribution. These are hard to discriminate and need the most training.
 
-The `expelbo_temp` ($\tau$) parameter controls curriculum sharpness:
+The `enc_expelbo_temp` ($\tau_e$) parameter controls curriculum sharpness:
 
-- $\tau = 1$: Moderate differentiation ($\exp(-2) = 0.14$ vs $\exp(0) = 1$)
-- $\tau = 2$: Sharp differentiation ($\exp(-4) = 0.02$ vs $\exp(0) = 1$)
-- $\tau = 3$: Very sharp ($\exp(-6) = 0.002$ vs $\exp(0) = 1$)
+- $\tau_e = 1$: Moderate differentiation ($\exp(-2) = 0.14$ vs $\exp(0) = 1$)
+- $\tau_e = 2$: Sharp differentiation ($\exp(-4) = 0.02$ vs $\exp(0) = 1$)
+- $\tau_e = 3$: Very sharp ($\exp(-6) = 0.002$ vs $\exp(0) = 1$)
 
 Note: the ELBO multiplication previously in the formulation
 ($-\text{ELBO} \cdot \exp(\tau \cdot \text{ELBO})$) was removed. With ELBO properly
@@ -209,10 +254,32 @@ The old formulation had the encoder maximizing ALL ELBOs (including rec/fake) be
 the $-\text{ELBO}$ factor flipped the sign; now the encoder purely minimizes exp-weighted
 fake/rec quality — bad fakes contribute less, good fakes contribute more.
 
+### Spatial Curriculum in the Encoder
+
+The encoder's ELBO terms use the same `spatial_temperature` as the decoder. This
+has two effects that are both beneficial:
+
+1. **On `ELBO_real`**: Amplifies gradient signal for structural regions in the
+   latent space. The encoder allocates more representation capacity to edges and
+   transitions, producing richer latent codes for structurally complex areas.
+   At inference, this translates to **sharper anomaly maps** — the encoder's
+   features are more sensitive to structural detail precisely where defects tend
+   to appear (cracks at edges, inclusions near interfaces).
+
+2. **On `ELBO_rec` / `ELBO_fake`**: Counterintuitively helps equilibrium.
+   Amplified structural errors make reconstructions look "more obviously bad" to
+   the encoder → ELBO values become more negative → `exp(τ_e · ELBO)` shrinks →
+   the encoder's rejection signal **dampens** via its own curriculum. The spatial
+   curriculum and expelbo interact to self-regulate.
+
+**Crucially, `diff_kld` is unaffected** — KLD is computed from `(mean, logvar)`
+directly, never touching `pixel_mse`. The equilibrium callback sees the same
+diagnostic signal regardless of spatial temperature.
+
 ### Why NOT `expelbo_real` in the Encoder
 
-Using curriculum weighting on the real term is counterproductive. The gradient
-magnitude from $-\exp(\tau \cdot \text{ELBO}_{\text{real}})$ scales as:
+Using per-sample curriculum weighting on the real term is counterproductive. The
+gradient magnitude from $-\exp(\tau \cdot \text{ELBO}_{\text{real}})$ scales as:
 
 $$\text{weight} = \tau \cdot \exp(\tau \cdot \text{ELBO}_{\text{real}})$$
 
@@ -226,6 +293,12 @@ This is exactly backwards. The encoder should push **hardest** when real ELBO is
 sense for rejection ("don't waste energy on obvious garbage") but not for fitting
 ("always build a good latent space for reals"). The linear $-\text{ELBO}_{\text{real}}$
 provides constant gradient weight regardless of current quality — which is correct.
+
+**Note**: This applies specifically to **per-sample** curriculum weighting (different
+samples in the batch getting different weights). The spatial curriculum ($\tau_s$) is
+a different mechanism — it redistributes gradient **within** each sample without
+changing the per-sample contribution. Every sample still gets the same total gradient
+magnitude thanks to per-sample normalization.
 
 ### No Embedding Loss in the Encoder
 
@@ -264,14 +337,49 @@ Including embedding loss (even as adversarial maximization) in the encoder is ei
 The decoder plays the role of a **generator**. It is trained to produce outputs that
 the encoder considers normal, whether starting from real latent codes or pure noise.
 
-$$\mathcal{L}_{\text{dec}} = \underbrace{-\text{ELBO}_{\text{real}}}_{\text{Reconstruct faithfully}} \underbrace{- \frac{1}{2}(\text{ELBO}_{\text{rec}} + \text{ELBO}_{\text{fake}})}_{\text{Fool the encoder}} + \underbrace{\lambda_{\text{embed}} \cdot \mathcal{L}_{\text{embed}}}_{\text{Feature consistency}}$$
+$$\mathcal{L}_{\text{dec}} = \underbrace{-\text{ELBO}_{\text{real}}}_{\text{Reconstruct faithfully}} + \frac{1}{2} \left( \underbrace{\exp(-\tau_d \cdot \text{ELBO}_{\text{rec}})}_{\text{Fool (cycle)}} + \underbrace{\exp(-\tau_d \cdot \text{ELBO}_{\text{fake}})}_{\text{Fool (generation)}} \right) + \underbrace{\lambda_{\text{embed}} \cdot \mathcal{L}_{\text{embed}}}_{\text{Feature consistency}}$$
 
-| Term                         | Signal to decoder                                                   |
-| ---------------------------- | ------------------------------------------------------------------- |
-| $-\text{ELBO}_{\text{real}}$ | Produce reconstructions $I'$ that match the input at pixel level    |
-| $-\text{ELBO}_{\text{rec}}$  | Re-reconstructions $I''$ should also score highly (cycle stability) |
-| $-\text{ELBO}_{\text{fake}}$ | Random generations, when round-tripped, should look normal          |
-| $\mathcal{L}_{\text{embed}}$ | Reconstructions must be faithful in the encoder's feature space     |
+| Term                                            | Signal to decoder                                                          |
+| ----------------------------------------------- | -------------------------------------------------------------------------- |
+| $-\text{ELBO}_{\text{real}}$                    | Produce reconstructions $I'$ that match the input at pixel level           |
+| $\exp(-\tau_d \cdot \text{ELBO}_{\text{rec}})$  | Re-reconstructions $I''$ should fool the encoder (focus on hard)           |
+| $\exp(-\tau_d \cdot \text{ELBO}_{\text{fake}})$ | Random generations, when round-tripped, should look normal (focus on hard) |
+| $\mathcal{L}_{\text{embed}}$                    | Reconstructions must be faithful in the encoder's feature space            |
+
+### Exponential Curriculum Weighting (Decoder)
+
+The decoder's adversarial terms use **inverted** curriculum weighting compared to
+the encoder:
+
+$$\exp(-\tau_d \cdot \text{ELBO})$$
+
+The direction is reversed because the decoder's "hard" cases are the opposite of
+the encoder's:
+
+| Component   | "Hard" means                           | Curriculum direction                          |
+| ----------- | -------------------------------------- | --------------------------------------------- |
+| **Encoder** | High ELBO (good fakes, hard to reject) | $\exp(+\tau_e \cdot \text{ELBO})$ — up-weight |
+| **Decoder** | Low ELBO (encoder rejects easily)      | $\exp(-\tau_d \cdot \text{ELBO})$ — up-weight |
+
+With ELBO $\in [-2, 0]$ and $\tau_d = 1$:
+
+- **Decoder easily fools encoder** (ELBO $\approx 0$): $\exp(0) = 1$ → normal gradient
+- **Decoder failing badly** (ELBO $\approx -2$): $\exp(2) \approx 7.4$ → 7× more gradient
+
+The gradient analysis confirms correct behavior:
+
+$$\frac{\partial}{\partial \theta} \exp(-\tau_d \cdot \text{ELBO}) = -\tau_d \cdot \exp(-\tau_d \cdot \text{ELBO}) \cdot \frac{\partial \text{ELBO}}{\partial \theta}$$
+
+Since the decoder wants to increase ELBO ($\partial\text{ELBO}/\partial\theta > 0$),
+the gradient points toward minimizing this loss (= increasing ELBO), with magnitude
+proportional to $\exp(-\tau_d \cdot \text{ELBO})$ — larger for hard cases. ✓
+
+The `dec_expelbo_temp` ($\tau_d$) parameter controls how aggressively the decoder
+focuses on its failure modes:
+
+- $\tau_d = 1$: Moderate focus (7× ratio between hardest and easiest)
+- $\tau_d = 2$: Sharp focus (55× ratio)
+- $\tau_d = 0$: No curriculum; falls back to linear $-\text{ELBO}$ (original behavior)
 
 ### Why `ELBO_real` Is Essential in the Decoder
 
@@ -295,13 +403,62 @@ The three decoder signals are complementary and all necessary:
 
 - `elbo_real` (pixel MSE): "Make every pixel right" → prevents hallucination
 - `embed_loss` (features): "Make it right to the encoder" → prevents blur
-- `elbo_rec + elbo_fake`: "Fool the encoder" → pushes toward normal manifold
+- `expelbo_rec + expelbo_fake`: "Fool the encoder" → pushes toward normal manifold,
+  with adaptive focus on the samples where the decoder is struggling most
 
 Note that $\text{ELBO}_{\text{real}}$ in the decoder uses a **stop-gradiented**
 $D_{\text{KL}}$ from the encoder step: the decoder receives pure reconstruction
 gradient without conflicting KL signals from the encoder's latent parameterization.
 The `kld_real` is present only to keep the loss value consistent with the ELBO
 formulation but contributes zero gradient to the decoder.
+
+### Why NOT `expelbo_real` in the Decoder
+
+The same principle that excludes per-sample curriculum from the encoder's `elbo_real`
+applies to the decoder: **fitting terms need constant uniform pressure**.
+
+If we applied `exp(-τ_d · ELBO_real)` to the decoder:
+
+| ELBO_real | Quality             | Weight (τ=1)   | Effect                  |
+| --------- | ------------------- | -------------- | ----------------------- |
+| ≈ -2.0    | Bad reconstruction  | exp(2) ≈ 7.4   | Focus here              |
+| ≈ -0.1    | Good reconstruction | exp(0.1) ≈ 1.1 | **Neglect this sample** |
+
+The "neglect" is dangerous for anomaly detection. Those easy-to-reconstruct samples
+are easy **now** but need maintained effort to **stay** easy. Without gradient
+pressure, their reconstruction quality can drift. At inference, if a previously-easy
+normal sample has degraded reconstruction, it produces a **false positive anomaly**.
+
+The decoder must maintain **uniformly good reconstruction across all normal samples**
+because at inference, any normal sample could be the test case. Curriculum weighting
+makes sense for adversarial terms ("focus on what you're failing at") but not for
+fitting terms ("always reconstruct the entire normal manifold uniformly").
+
+**Note**: The spatial curriculum ($\tau_s$) is different — it redistributes gradient
+**within** each sample without reducing any sample's total contribution. Every sample
+maintains the same total gradient magnitude thanks to per-sample normalization.
+Spatial curriculum = "focus on hard REGIONS within every image"; per-sample
+curriculum = "focus on hard IMAGES in the batch." Only the former is safe for
+fitting terms.
+
+### Spatial Curriculum in the Decoder
+
+The decoder uses the same `spatial_temperature` as the encoder for its pixel MSE
+terms. This directly addresses the X-ray spatial dilution problem:
+
+- **Uniform background** (error ≈ 0.001, $\tau_s$=5): weight ≈ 1.005
+- **Structural detail** (error ≈ 0.1, $\tau_s$=5): weight ≈ 1.65
+
+After normalization, structural regions get ~1.6× more gradient budget. The decoder
+is told: "focus capacity on hard-to-reconstruct regions (edges, transitions, fine
+detail) rather than trivially uniform background."
+
+This creates a positive feedback loop:
+
+1. Spatial curriculum → decoder improves on structural regions
+2. Better structural reconstruction → embedding loss decreases
+3. Lower embedding loss → less adversarial imbalance
+4. Better equilibrium → fewer callback pauses → more consistent training
 
 ### Embedding Loss as Perceptual Critic (Decoder Only)
 
@@ -321,6 +478,19 @@ $$\text{score}(x) = d\big(E(x),\ E(D(z))\big)$$
 is high precisely because the encoder was **never trained to suppress** the
 difference between original and reconstructed features.
 
+#### Why NOT Curriculum on Embedding Loss
+
+The embedding loss already operates in feature space, which provides natural
+importance weighting — deeper features capture structural information rather than
+background. Additionally, the spatial curriculum on pixel MSE indirectly helps
+embedding loss: as the decoder improves reconstruction of structural regions, the
+feature representations naturally converge.
+
+If `loss_embed` plateaus while `loss_rec` continues dropping, this indicates the
+embedding features are capturing something the pixel loss doesn't directly address
+(e.g., phase/frequency information). In that case, depth-weighted embedding loss
+(§2) is the appropriate intervention, not per-sample curriculum weighting.
+
 ---
 
 ## 5. Loss Weight Balance & Asymmetric Training Dynamics
@@ -328,44 +498,81 @@ difference between original and reconstructed features.
 ### Effective Weight Analysis
 
 ```
-Encoder: -elbo_real + 0.5 * (expelbo_rec + expelbo_fake)
-          \_______/   \________________________________/
-           weight 1.0    weight 0.5 each, curriculum-damped
+Encoder: -elbo_real + 0.5 * (exp(τ_e · elbo_rec) + exp(τ_e · elbo_fake))
+          \_______/   \______________________________________________/
+           weight 1.0    weight 0.5 each, curriculum-damped (focus on hard-to-reject)
 
-Decoder: -elbo_real - 0.5 * (elbo_rec + elbo_fake) + λ * embed_loss
-          \_______/   \____________________________/   \___________/
-           weight 1.0    weight 0.5 each, full signal     extra term
+Decoder: -elbo_real + 0.5 * (exp(-τ_d · elbo_rec) + exp(-τ_d · elbo_fake)) + λ * embed_loss
+          \_______/   \________________________________________________/   \___________/
+           weight 1.0    weight 0.5 each, curriculum-amplified (focus on hard-to-fool)
+                                                                             extra term
 ```
 
-The asymmetry between encoder (curriculum-damped rejection) and decoder (full signal)
-creates a **built-in head start for the decoder**:
+### Dual Curriculum: Complementary Focus
 
-| Training phase         | Encoder effective signal          | Decoder effective signal                                  |
-| ---------------------- | --------------------------------- | --------------------------------------------------------- |
-| **Early** (bad fakes)  | `≈ -elbo_real + 0` (expelbo ≈ 0)  | Full: `-elbo_real - 0.5*(elbo_rec + elbo_fake) + λ*embed` |
-| **Mid** (decent fakes) | `-elbo_real + moderate rejection` | Full signal (unchanged)                                   |
-| **Late** (good fakes)  | `-elbo_real + full rejection`     | Full signal (unchanged)                                   |
+The encoder and decoder curricula create a **complementary adaptive pressure** system:
 
-The encoder starts soft (mostly fitting reals) and progressively sharpens its
-discrimination as the decoder improves. The decoder always receives full gradient
-pressure. This is appropriate because:
+| Training phase         | Encoder signal                                  | Decoder signal                                      |
+| ---------------------- | ----------------------------------------------- | --------------------------------------------------- |
+| **Early** (bad fakes)  | `≈ -elbo_real + 0` (expelbo dampens bad fakes)  | HIGH: exp(-τ_d · bad_ELBO) amplifies failing cases  |
+| **Mid** (decent fakes) | `-elbo_real + moderate` (some rejection signal) | MODERATE: signal normalizes as decoder improves     |
+| **Late** (good fakes)  | `-elbo_real + full` (hard-to-reject dominate)   | LOW: exp(-τ_d · good_ELBO) ≈ 1 (decoder succeeding) |
+
+The two curricula interact to **compress the equilibrium gap from both sides**:
+
+- **Encoder self-regulates**: spatial curriculum makes fakes look worse → expelbo
+  shrinks → encoder relaxes adversarial pressure
+- **Decoder focuses on failures**: inverted expelbo amplifies gradient on samples
+  the encoder easily rejects → decoder catches up faster
+
+```
+                        Encoder                          Decoder
+                        ───────                          ───────
+Spatial curriculum:     Amplifies structural errors      Amplifies structural errors
+                              │                                │
+                              ▼                                ▼
+Effect on ELBO values:  All ELBOs more negative          All ELBOs more negative
+                              │                                │
+                              ▼                                ▼
+Interaction with        exp(+τ_e · ELBO) SHRINKS         exp(-τ_d · ELBO) GROWS
+sample curriculum:      (bad fakes dampened more)         (hard samples amplified more)
+                              │                                │
+                              ▼                                ▼
+Net adversarial         LESS aggressive                  MORE aggressive
+pressure:               (self-regulates)                 (focuses on failures)
+                              │                                │
+                              ▼                                ▼
+Equilibrium:            ←── GAP NARROWS ──→
+```
+
+### Why the Asymmetry Is Correct
+
+The encoder starts soft and sharpens over time; the decoder starts aggressive on
+failures and normalizes as it improves. This is appropriate because:
 
 1. **The decoder's task is harder** — unconditional generation from bottleneck
-   without skip connections requires consistent strong signal
+   without skip connections requires consistent strong signal, especially on
+   failure modes
 2. **Early discrimination is free** — bad fakes are trivially rejected; wasting
    encoder capacity on them prevents it from building a good latent space for reals
 3. **Late discrimination matters most** — when fakes are good, the encoder must
    learn subtle differences, which is when expelbo weight approaches 1.0
+4. **Decoder must converge faster** — the decoder curriculum provides amplified
+   signal exactly where it's struggling, accelerating convergence toward equilibrium
 
 ### Tuning the Balance
 
-The 0.5 coefficient gives equal total weight to fitting (1.0) vs rejection (0.5 + 0.5 = 1.0).
-Adjustments:
+The 0.5 coefficient gives equal total weight to fitting (1.0) vs adversarial
+(0.5 + 0.5 = 1.0). Adjustments:
 
 - If encoder becomes too aggressive (decoder can't keep up): reduce to 0.3 each
 - If decoder runs away (encoder can't discriminate): increase to 0.7 each
-- `expelbo_temp` ($\tau$): higher values sharpen the curriculum, giving the decoder
-  more head start; lower values make curriculum weaker
+- `enc_expelbo_temp` ($\tau_e$): higher values dampen easy rejections more,
+  giving the decoder more head start
+- `dec_expelbo_temp` ($\tau_d$): higher values amplify decoder's focus on
+  failure modes; if training becomes unstable (loss spikes), reduce
+- `spatial_temperature` ($\tau_s$): controls within-image focus for both;
+  higher values concentrate gradient on structurally complex regions
 
 ---
 
@@ -624,16 +831,37 @@ Epoch 0                   Plateau detected         Post-thaw
 
 ## 9. Hyperparameter Reference
 
-| Parameter            | Default | Range      | Effect                                                               |
-| -------------------- | ------- | ---------- | -------------------------------------------------------------------- |
-| `beta_kld`           | 0.25    | 0.01–2.0   | KLD weight in ELBO. <1 = reconstruction focus; ≥1 = latent structure |
-| `expelbo_temp`       | 1.0     | 0.5–3.0    | Curriculum sharpness. Higher = more head start for decoder           |
-| `lambda_embed`       | 1.0     | 0.1–5.0    | Embedding loss weight. Higher = more perceptual fidelity             |
-| `upper_threshold`    | 2.0     | 1.0–5.0    | diff_kld above which encoder is paused                               |
-| `lower_threshold`    | -0.5    | -2.0–0.0   | diff_kld below which decoder is paused (tighter = safer)             |
-| `ema_momentum`       | 0.99    | 0.95–0.999 | EMA smoothing for equilibrium callback                               |
-| `min_pause_steps`    | 50      | 20–200     | Minimum steps a component stays paused                               |
-| `backbone_lr_factor` | 0.01    | 0.001–0.1  | Backbone LR relative to head after thawing                           |
+| Parameter             | Default | Range      | Effect                                                               |
+| --------------------- | ------- | ---------- | -------------------------------------------------------------------- |
+| `beta_kld`            | 0.25    | 0.01–2.0   | KLD weight in ELBO. <1 = reconstruction focus; ≥1 = latent structure |
+| `enc_expelbo_temp`    | 1.0     | 0.5–3.0    | Encoder curriculum sharpness. Higher = more head start for decoder   |
+| `dec_expelbo_temp`    | 1.0     | 0.5–2.0    | Decoder curriculum sharpness. Higher = more focus on failure modes   |
+| `spatial_temperature` | 1.0     | 0.0–20.0   | Spatial hard-pixel mining. Higher = more focus on structural regions |
+| `lambda_embed`        | 1.0     | 0.1–5.0    | Embedding loss weight. Higher = more perceptual fidelity             |
+| `upper_threshold`     | 2.0     | 1.0–5.0    | diff_kld above which encoder is paused                               |
+| `lower_threshold`     | -0.5    | -2.0–0.0   | diff_kld below which decoder is paused (tighter = safer)             |
+| `ema_momentum`        | 0.99    | 0.95–0.999 | EMA smoothing for equilibrium callback                               |
+| `min_pause_steps`     | 50      | 20–200     | Minimum steps a component stays paused                               |
+| `backbone_lr_factor`  | 0.01    | 0.001–0.1  | Backbone LR relative to head after thawing                           |
+
+### Curriculum Parameter Interactions
+
+`spatial_temperature` and the expelbo temperatures interact multiplicatively:
+
+- **Spatial curriculum shifts ELBO values** more negative (amplified structural errors)
+- **Encoder expelbo** then dampens these (more negative ELBO → smaller exp)
+- **Decoder expelbo** then amplifies these (more negative ELBO → larger exp)
+
+When tuning:
+
+1. Start with `spatial_temperature = 5.0` for single-channel X-rays
+2. If equilibrium callback still triggers excessively → increase `dec_expelbo_temp`
+3. If training becomes unstable (loss spikes) → decrease `dec_expelbo_temp` or
+   add gradient clipping
+4. Monitor `expelbo_rec_dec` / `expelbo_fake_dec` — if consistently > 20,
+   cap or reduce temperatures
+5. `enc_expelbo_temp` rarely needs adjustment — the spatial curriculum interaction
+   provides natural self-regulation
 
 ---
 
@@ -661,13 +889,15 @@ decoder architecture capacity matters.
 
 ## 11. Design Decisions Considered & Rejected
 
-| Idea                               | Verdict     | Reason                                                                                 |
-| ---------------------------------- | ----------- | -------------------------------------------------------------------------------------- |
-| Adversarial embed in encoder       | ❌          | No-op when frozen; corrupts features when thawed; redundant with ELBO                  |
-| `expelbo_real` in encoder          | ❌          | Curriculum on fitting term reduces signal when reals are bad = wrong direction         |
-| Skip connections (encoder→decoder) | ❌          | Leaks anomalous features, suppresses anomaly signal                                    |
-| Sum reduction in losses            | ❌ Replaced | Resolution-dependent magnitudes; hard to interpret/tune                                |
-| `log_normal_pdf` for KLD           | ❌ Replaced | Monte Carlo estimate with variance; closed form is exact and cheaper                   |
-| Diffusion decoder                  | ❌          | Multiple denoising steps kills CPU real-time inference                                 |
-| ViT encoder                        | ❌          | Slower on CPU than MobileNet; no natural multi-scale features for spatial anomaly maps |
-| Standard ConvTranspose upsampling  | ❌ Replaced | Checkerboard artifacts waste decoder capacity                                          |
+| Idea                                | Verdict     | Reason                                                                                  |
+| ----------------------------------- | ----------- | --------------------------------------------------------------------------------------- |
+| Adversarial embed in encoder        | ❌          | No-op when frozen; corrupts features when thawed; redundant with ELBO                   |
+| `expelbo_real` in encoder           | ❌          | Curriculum on fitting term reduces signal when reals are bad = wrong direction          |
+| `expelbo_real` in decoder           | ❌          | Neglects easy samples → reconstruction drift → false positive anomalies at inference    |
+| Per-sample curriculum on embed_loss | ❌          | Feature space has natural importance weighting; spatial curriculum addresses root cause |
+| Skip connections (encoder→decoder)  | ❌          | Leaks anomalous features, suppresses anomaly signal                                     |
+| Sum reduction in losses             | ❌ Replaced | Resolution-dependent magnitudes; hard to interpret/tune                                 |
+| `log_normal_pdf` for KLD            | ❌ Replaced | Monte Carlo estimate with variance; closed form is exact and cheaper                    |
+| Diffusion decoder                   | ❌          | Multiple denoising steps kills CPU real-time inference                                  |
+| ViT encoder                         | ❌          | Slower on CPU than MobileNet; no natural multi-scale features for spatial anomaly maps  |
+| Standard ConvTranspose upsampling   | ❌ Replaced | Checkerboard artifacts waste decoder capacity                                           |

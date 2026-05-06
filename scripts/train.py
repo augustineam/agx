@@ -114,7 +114,9 @@ if ra_model.exists():
 else:
     enc = MobileNetV3SmallEncoder(latent_size=512, progressive=True)
     dec = MobileNetV3SmallDecoder(target_shape=img_shape[1:], progressive=True)
-    ra = ReversedAutoencoder(enc, dec, beta_kld=0.1, freeze_backbone=False)
+    ra = ReversedAutoencoder(
+        enc, dec, beta_kld=0.1, spatial_temperature=5.0, freeze_backbone=False
+    )
     ra.build([img_shape, cond_shape])
     ra.place_on_devices("cuda:0", "cuda:1")
     ra.compile(Adam(learning_rate=7e-6), Adam(learning_rate=1e-2))
