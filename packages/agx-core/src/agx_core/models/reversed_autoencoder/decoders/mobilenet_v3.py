@@ -91,7 +91,7 @@ class MobileNetV3SmallDecoder(BaseDecoder):
                 # 7->14
                 InvertedResidualBlock(96, 6, 5, activation="hard_swish", expand=False),
                 InvertedResidualBlock(96, 6, 5, activation="hard_swish"),
-                Upsample2x(),
+                Upsample2x("nearest"),
                 InvertedResidualBlock(96, 6, 5, activation="hard_swish"),
                 layers.SpatialDropout2D(0.2),
                 name="stage_0",
@@ -102,36 +102,33 @@ class MobileNetV3SmallDecoder(BaseDecoder):
                 InvertedResidualBlock(40, 6, 5, activation="hard_swish"),
                 InvertedResidualBlock(48, 3, 5, activation="hard_swish"),
                 InvertedResidualBlock(48, 3, 5, activation="hard_swish"),
-                Upsample2x(),
-                InvertedResidualBlock(40, 4, 5, activation="hard_swish"),
+                Upsample2x("nearest"),
                 InvertedResidualBlock(40, 4, 5, activation="hard_swish"),
                 layers.SpatialDropout2D(0.15),
                 name="stage_1",
             ),
             Sequential(
                 # 28->56
-                InvertedResidualBlock(24, 4, 3, activation="hard_swish"),
-                InvertedResidualBlock(24, 4, 3, activation="hard_swish"),
-                Upsample2x(),
-                InvertedResidualBlock(24, 3, 3, activation="hard_swish"),
-                InvertedResidualBlock(24, 3, 3, activation="hard_swish"),
+                InvertedResidualBlock(24, 88.0 / 24, se_ratio=0.0),
+                Upsample2x("nearest"),
+                InvertedResidualBlock(24, 72.0 / 24, se_ratio=0.0),
                 layers.SpatialDropout2D(0.1),
                 name="stage_2",
             ),
             Sequential(
                 # 56->112
-                InvertedResidualBlock(24, 3, 3, activation="hard_swish"),
-                Upsample2x(),
-                InvertedResidualBlock(16, 2, 3, activation="hard_swish"),
-                InvertedResidualBlock(16, 2, 3, activation="hard_swish"),
+                ResidualBlock(24, False, activation="hard_swish"),
+                Upsample2x("bilinear"),
+                ResidualBlock(16, False, activation="hard_swish"),
+                ResidualBlock(16, False, activation="hard_swish"),
                 layers.SpatialDropout2D(0.05),
                 name="stage_3",
             ),
             Sequential(
                 # 112->224
-                Upsample2x(),
-                InvertedResidualBlock(16, 2, 3, activation="hard_swish"),
-                InvertedResidualBlock(16, 2, 3, activation="hard_swish"),
+                Upsample2x("bilinear"),
+                ResidualBlock(16, False, activation="hard_swish"),
+                ResidualBlock(16, False, activation="hard_swish"),
                 layers.Conv2D(16, 3, padding="same", use_bias=False),
                 layers.BatchNormalization(ch_axis, epsilon=1e-3, momentum=0.999),
                 layers.Activation("hard_swish"),
@@ -153,7 +150,9 @@ class MobileNetV3SmallDecoder(BaseDecoder):
         if self._initial_stage is not None:
             # Restoring from serialized state (mid-growth or fully grown)
             self._current_stage = self._initial_stage
-            self._alpha = self._initial_alpha if self._initial_alpha is not None else 1.0
+            self._alpha = (
+                self._initial_alpha if self._initial_alpha is not None else 1.0
+            )
         elif self.progressive:
             self._current_stage = 0
             self._alpha = 1.0

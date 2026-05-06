@@ -2,27 +2,20 @@ from __future__ import annotations
 
 import keras
 
-from agx_core.helpers import _channel_axis, _layer_norm_axis
 from keras import ops, layers
 from typing import Dict, Any, Union, Tuple, Sequence, Optional
+
+from agx_core.helpers import _channel_axis, _layer_norm_axis
+from agx_core.layers import Sequential
 
 _size = Union[int, Tuple[int, int]]
 
 
-def _depth(v: int, divisor: int = 8, min_value: int | None = None) -> int:
-    """Round channel count to the nearest multiple of *divisor*."""
-    if min_value is None:
-        min_value = divisor
-    new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
-    # Ensure rounding doesn't reduce by more than 10%.
-    if new_v < 0.9 * v:
-        new_v += divisor
-    return new_v
-
-
-@keras.saving.register_keras_serializable(package="agx_core.models.reversed_autoencoder")
+@keras.saving.register_keras_serializable(
+    package="agx_core.models.reversed_autoencoder"
+)
 class ConvBlock(layers.Layer):
-    """Fusing Conv2D, LayerNormalization, and optional LeakyReLU.
+    """Fusing Conv2D, BatchNormalization, and optional LeakyReLU.
 
     Args:
         filters: Output channels.
@@ -42,10 +35,11 @@ class ConvBlock(layers.Layer):
         padding: str = "valid",
         groups: int = 1,
         use_bias: bool = True,
-        use_activation: bool = True,
+        activation: Optional[str] = None,
+        name="conv_block",
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super(ConvBlock, self).__init__(name=name, **kwargs)
 
         self.filters = filters
         self.kernel_size = kernel_size
@@ -53,23 +47,30 @@ class ConvBlock(layers.Layer):
         self.padding = padding
         self.groups = groups
         self.use_bias = use_bias
-        self.use_activation = use_activation
-
-        self.conv = layers.Conv2D(
-            filters,
-            kernel_size,
-            strides=strides,
-            padding=padding,
-            groups=groups,
-            use_bias=use_bias,
-        )
-        self.norm = layers.LayerNormalization(axis=_layer_norm_axis())
-        self.act = layers.LeakyReLU(0.2) if use_activation else layers.Identity()
+        self._activation = activation
 
     def build(self, input_shape: Sequence[int]):
+
+        ch_axis = _channel_axis()
+        groups = max(1, self.filters // 4)
+
+        self.conv = layers.Conv2D(
+            self.filters,
+            self.kernel_size,
+            strides=self.strides,
+            padding=self.padding,
+            groups=self.groups,
+            use_bias=self.use_bias,
+        )
+        self.norm = layers.GroupNormalization(groups=groups, axis=ch_axis, epsilon=1e-3)
+        self.activation = (
+            layers.Activation(self._activation) if self._activation else None
+        )
+
         self.conv.build(input_shape)
         x_shape = self.conv.compute_output_shape(input_shape)
         self.norm.build(x_shape)
+
         super(ConvBlock, self).build(input_shape)
 
     def compute_output_shape(self, input_shape: Sequence[int]) -> Sequence[int]:
@@ -80,10 +81,12 @@ class ConvBlock(layers.Layer):
     ) -> keras.KerasTensor:
         x = self.conv(x)
         x = self.norm(x, training=training)
-        return self.act(x)
+        if self.activation:
+            return self.activation(x)
+        return x
 
     def get_config(self):
-        config = super().get_config()
+        config = super(ConvBlock, self).get_config()
         config.update(
             dict(
                 filters=self.filters,
@@ -92,15 +95,17 @@ class ConvBlock(layers.Layer):
                 padding=self.padding,
                 groups=self.groups,
                 use_bias=self.use_bias,
-                use_activation=self.use_activation,
+                activation=self._activation,
             )
         )
         return config
 
 
-@keras.saving.register_keras_serializable(package="agx_core.models.reversed_autoencoder")
+@keras.saving.register_keras_serializable(
+    package="agx_core.models.reversed_autoencoder"
+)
 class DeConvBlock(layers.Layer):
-    """Fusing Conv2DTranspose, LayerNormalization, and LeakyReLU.
+    """Fusing Conv2DTranspose, BatchNormalization, and LeakyReLU.
 
     Args:
         filters: Output channels.
@@ -137,7 +142,7 @@ class DeConvBlock(layers.Layer):
             output_padding=output_padding,
             use_bias=use_bias,
         )
-        self.norm = layers.LayerNormalization(axis=_layer_norm_axis())
+        self.norm = layers.BatchNormalization(axis=_layer_norm_axis())
         self.lrelu = layers.LeakyReLU(0.2)
 
     def build(self, input_shape: Sequence[int]):
@@ -171,56 +176,94 @@ class DeConvBlock(layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable(package="agx_core.models.reversed_autoencoder")
+@keras.saving.register_keras_serializable(
+    package="agx_core.models.reversed_autoencoder"
+)
 class ResidualBlock(layers.Layer):
-    """Residual connection with optional channel expansion and grouped convolution.
+    """Bottleneck residual connection.
 
     Args:
         filters: Number of output filters.
-        scale: Scale factor for intermediate filters.
-        groups: Number of convolution groups for the second conv layer.
+        activation: Activation to be used. Default 'leaky_rely'
     """
 
-    def __init__(self, filters: int, scale: float = 1.0, groups: int = 1, **kwargs):
-        super().__init__(**kwargs)
-
-        fmid = int(filters * scale)
-
+    def __init__(
+        self,
+        filters: int,
+        bottleneck: bool = True,
+        activation: str = "leaky_relu",
+        name="residual",
+        **kwargs,
+    ):
+        super(ResidualBlock, self).__init__(name=name, **kwargs)
         self.filters = filters
-        self.scale = scale
-        self.groups = groups
-
-        self.conv_expand = None
-        self.conv1 = ConvBlock(fmid, 3, strides=1, padding="same", use_bias=False)
-        self.conv2 = ConvBlock(
-            filters,
-            3,
-            strides=1,
-            padding="same",
-            groups=groups,
-            use_bias=False,
-            use_activation=False,
-        )
-        self.lrelu = layers.LeakyReLU(0.2)
-        self.add = layers.Add()
+        self.bottleneck = bottleneck
+        self._activation = activation
 
     def build(self, input_shape: Sequence[int]):
 
-        expand = input_shape[_channel_axis()] != self.filters
-        self.conv_expand = (
-            layers.Conv2D(self.filters, 1, use_bias=False)
-            if expand
-            else layers.Identity()
+        ch_axis = _channel_axis()
+        in_ch = input_shape[ch_axis]
+
+        mid_ch = self.filters // 2 if self.bottleneck else self.filters
+        kernel_size = 1 if self.bottleneck else 3
+
+        self.conv1 = Sequential(
+            layers.Conv2D(mid_ch, kernel_size, padding="same", use_bias=False),
+            layers.GroupNormalization(max(1, mid_ch // 4), axis=ch_axis, epsilon=1e-3),
+            layers.Activation(self._activation),
+            name="conv1",
         )
 
-        self.conv_expand.build(input_shape)
-        y_shape = self.conv_expand.compute_output_shape(input_shape)
+        self.conv2 = Sequential(
+            layers.Conv2D(mid_ch, 3, padding="same", use_bias=False),
+            layers.GroupNormalization(max(1, mid_ch // 4), axis=ch_axis, epsilon=1e-3),
+            layers.Activation(self._activation),
+            name="conv2",
+        )
+
+        self.conv3 = (
+            Sequential(
+                layers.Conv2D(self.filters, 1, padding="same", use_bias=False),
+                layers.GroupNormalization(
+                    max(1, self.filters // 4), axis=ch_axis, epsilon=1e-3
+                ),
+                name="conv3",
+            )
+            if self.bottleneck
+            else None
+        )
+
+        self.expand_conv = (
+            Sequential(
+                layers.Conv2D(self.filters, 1, padding="same", use_bias=False),
+                layers.GroupNormalization(
+                    max(1, self.filters // 4), axis=ch_axis, epsilon=1e-3
+                ),
+                name="expand_shortcut",
+            )
+            if in_ch != self.filters
+            else None
+        )
+
+        self.add = layers.Add()
+        self.activation = layers.Activation(self._activation)
+
+        if self.expand_conv:
+            self.expand_conv.build(input_shape)
+            y_shape = self.expand_conv.compute_output_shape(input_shape)
+        else:
+            y_shape = input_shape
 
         self.conv1.build(input_shape)
         x_shape = self.conv1.compute_output_shape(input_shape)
 
         self.conv2.build(x_shape)
         x_shape = self.conv2.compute_output_shape(x_shape)
+
+        if self.conv3:
+            self.conv3.build(x_shape)
+            x_shape = self.conv3.compute_output_shape(x_shape)
 
         self.add.build([x_shape, y_shape])
 
@@ -229,24 +272,38 @@ class ResidualBlock(layers.Layer):
     def compute_output_shape(self, input_shape: Sequence[int]) -> Sequence[int]:
         x_shape = self.conv1.compute_output_shape(input_shape)
         x_shape = self.conv2.compute_output_shape(x_shape)
+        if self.conv3:
+            x_shape = self.conv3.compute_output_shape(x_shape)
         return x_shape
 
     def call(
         self, x: keras.KerasTensor, training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        expand = self.conv_expand(x, training=training)
+
+        shortcut = self.expand_conv(x, training=training) if self.expand_conv else x
+
         x = self.conv1(x, training=training)
         x = self.conv2(x, training=training)
-        x = self.add([x, expand])
-        return self.lrelu(x)
+        x = self.conv3(x, training=training) if self.conv3 else x
+
+        x = self.add([x, shortcut])
+        return self.activation(x)
 
     def get_config(self) -> Dict[Any, Any]:
         config = super().get_config()
-        config.update(dict(filters=self.filters, scale=self.scale, groups=self.groups))
+        config.update(
+            dict(
+                filters=self.filters,
+                bottleneck=self.bottleneck,
+                activation=self._activation,
+            )
+        )
         return config
 
 
-@keras.saving.register_keras_serializable(package="agx_core.models.reversed_autoencoder")
+@keras.saving.register_keras_serializable(
+    package="agx_core.models.reversed_autoencoder"
+)
 class Reparameterization(layers.Layer):
     """Samples from latent space using the reparameterization trick: z = μ + σ * ε.
 
@@ -274,7 +331,9 @@ class Reparameterization(layers.Layer):
         return input_shape[0]
 
 
-@keras.saving.register_keras_serializable(package="agx_core.models.reversed_autoencoder")
+@keras.saving.register_keras_serializable(
+    package="agx_core.models.reversed_autoencoder"
+)
 class UpsampleRefine(layers.Layer):
     """Bilinear 2 x upsample + Conv refinement.
 
@@ -294,7 +353,7 @@ class UpsampleRefine(layers.Layer):
 
         self.upsample = layers.UpSampling2D(size=2, interpolation="bilinear")
         self.conv = layers.Conv2D(filters, kernel_size, padding="same", use_bias=False)
-        self.norm = layers.LayerNormalization(axis=_layer_norm_axis())
+        self.norm = layers.BatchNormalization(axis=_layer_norm_axis())
         self.act = layers.Activation("relu6")
 
     def build(self, input_shape):
@@ -328,7 +387,9 @@ class UpsampleRefine(layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable(package="agx_core.models.reversed_autoencoder")
+@keras.saving.register_keras_serializable(
+    package="agx_core.models.reversed_autoencoder"
+)
 class FiLM(layers.Layer):
     """Feature-wise Linear Modulation for conditioning.
 

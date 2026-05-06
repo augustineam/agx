@@ -5,6 +5,9 @@ os.environ["KERAS_BACKEND"] = "torch"
 import keras
 import torch
 
+from keras import ops
+from torch.utils.checkpoint import checkpoint
+
 from typing import Dict, Any
 
 from agx_core.models.reversed_autoencoder import ReversedAutoencoderBase
@@ -51,8 +54,12 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
                 self.encoder.train_backbone(False)
 
             self.zero_grad()
-            loss, aux_outputs, metric_updates = self.compute_encoder_loss(
-                real, noise, condition
+            loss, metric_updates = checkpoint(
+                self.compute_encoder_loss,
+                real,
+                noise,
+                condition,
+                use_reentrant=False,
             )
             loss.backward()
 
@@ -70,21 +77,21 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
             self.update_step_metrics(metric_updates)
         else:
             with torch.no_grad():
-                _, aux_outputs, metric_updates = self.compute_encoder_loss(
-                    real, noise, condition
+                _, metric_updates = self.compute_encoder_loss(
+                    real,
+                    noise,
+                    condition,
+                    use_reentrant=False,
                 )
             self.update_step_metrics(metric_updates)
-        return aux_outputs
 
-    def train_decoder(self, real, noise, condition, z_real, embeds_real, kld_real):
+    def train_decoder(self, real, noise, condition):
         if self.train_decoder_enabled:
             self.encoder.trainable = False
             self.decoder.trainable = True
 
             self.zero_grad()
-            loss, metric_updates = self.compute_decoder_loss(
-                real, noise, condition, z_real, embeds_real, kld_real
-            )
+            loss, metric_updates = self.compute_decoder_loss(real, noise, condition)
             loss.backward()
 
             dec = (
@@ -100,10 +107,24 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
             self.update_step_metrics(metric_updates)
         else:
             with torch.no_grad():
-                _, metric_updates = self.compute_decoder_loss(
-                    real, noise, condition, z_real, embeds_real, kld_real
-                )
+                _, metric_updates = self.compute_decoder_loss(real, noise, condition)
             self.update_step_metrics(metric_updates)
+
+    # def train_step(self, data):
+    #     (batch_real, batch_cond), _ = data
+
+    #     batch_size = ops.shape(batch_real)[0]
+    #     batch_noise = self.noise(batch_size)
+    #     batch_real = self.resize_progressive_output(batch_real)
+
+    #     self.train_encoder(batch_real, batch_noise, batch_cond)
+
+    #     # Force PyTorch to release cached blocks before decoder allocation
+    #     torch.cuda.empty_cache()
+
+    #     self.train_decoder(batch_real, batch_noise, batch_cond)
+
+    #     return self.get_metrics_result()
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]):

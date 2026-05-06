@@ -115,7 +115,7 @@ class MobileNetV3SmallEncoder(BaseEncoder):
 
         self.stages_head = Sequential(
             layers.Conv2D(576, 1, padding="same", use_bias=False),
-            layers.BatchNormalization(ch_axis, epsilon=1e-3, momentum=0.999),
+            layers.GroupNormalization(groups=16, axis=ch_axis, epsilon=1e-3),
             layers.Activation("hard_swish"),
             layers.SpatialDropout2D(0.3),
             name="stages_head",
@@ -123,7 +123,7 @@ class MobileNetV3SmallEncoder(BaseEncoder):
 
         self.to_latent = Sequential(
             layers.Concatenate(),
-            layers.Conv2D(2 * self.latent_size, 1),
+            layers.Conv2D(2 * self.latent_size, 1, use_bias=False),
             Split(2),
             name="to_latent",
         )
@@ -144,7 +144,9 @@ class MobileNetV3SmallEncoder(BaseEncoder):
         if self._initial_stage is not None:
             # Restoring from serialized state (mid-growth or fully grown)
             self._current_stage: int = self._initial_stage
-            self._alpha: float = self._initial_alpha if self._initial_alpha is not None else 1.0
+            self._alpha: float = (
+                self._initial_alpha if self._initial_alpha is not None else 1.0
+            )
         elif self.progressive:
             self._current_stage: int = 0
             self._alpha: float = 1.0

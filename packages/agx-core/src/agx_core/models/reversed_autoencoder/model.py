@@ -355,9 +355,7 @@ class ReversedAutoencoderBase(Model):
         fake = self.decoder([noise, condition], training=False)
 
         # Get the latent representations, embeddings and reconstructions for real samples
-        (mean_real, logvar_real), embeds_real = self.encoder(
-            [real, condition], training=True
-        )
+        (mean_real, logvar_real), _ = self.encoder([real, condition], training=True)
         z_real = self.reparameterize([mean_real, logvar_real])
         rec_real = self.decoder([z_real, condition], training=False)
 
@@ -427,12 +425,6 @@ class ReversedAutoencoderBase(Model):
         #   < 0:         Pathological — encoder finds fakes more normal than
         #                reals. Indicates training instability.
 
-        aux_outputs = (
-            ops.stop_gradient(z_real),
-            [ops.stop_gradient(embed) for embed in embeds_real],
-            ops.stop_gradient(kld_real),
-        )
-
         diff_kld = 0.5 * (kld_fake + kld_rec) - kld_real
 
         metric_updates = dict(
@@ -449,16 +441,13 @@ class ReversedAutoencoderBase(Model):
             diff_kld=diff_kld,
         )
 
-        return loss, aux_outputs, metric_updates
+        return loss, metric_updates
 
     def compute_decoder_loss(
         self,
         real: keras.KerasTensor,
         noise: keras.KerasTensor,
         condition: keras.KerasTensor,
-        z_real: keras.KerasTensor,
-        embeds_real: keras.KerasTensor,
-        kld_real: keras.KerasTensor,
     ):
         """Train the decoder to generate realistic samples and fool the encoder.
 
@@ -475,6 +464,18 @@ class ReversedAutoencoderBase(Model):
             embeds_real: Feature embeddings from real samples
             kld_real: KL divergence from real samples
         """
+
+        (mean_real, logvar_real), embeds_real = self.encoder(
+            [real, condition], training=False
+        )
+        z_real = self.reparameterize([mean_real, logvar_real])
+        kld_real = ops.mean(kl_divergence(mean_real, logvar_real), axis=[1, 2])
+
+        # Detach all encoder outputs — no gradient should flow back
+        z_real = ops.stop_gradient(z_real)
+        embeds_real = [ops.stop_gradient(embed) for embed in embeds_real]
+        kld_real = ops.stop_gradient(kld_real)
+
         # Generate fake samples and reconstruct real samples
         fake = self.decoder([noise, condition], training=True)
         rec_real = self.decoder([ops.stop_gradient(z_real), condition], training=True)
@@ -565,9 +566,6 @@ class ReversedAutoencoderBase(Model):
         real: keras.KerasTensor,
         noise: keras.KerasTensor,
         condition: keras.KerasTensor,
-        z_real: keras.KerasTensor,
-        embeds_real: keras.KerasTensor,
-        kld_real: keras.KerasTensor,
     ):
         """Train the decoder to generate realistic samples and fool the encoder.
 
@@ -609,12 +607,8 @@ class ReversedAutoencoderBase(Model):
         batch_noise = self.noise(batch_size)
         batch_real = self.resize_progressive_output(batch_real)
 
-        z_real, embeds_real, kld_real = self.train_encoder(
-            batch_real, batch_noise, batch_cond
-        )
-        self.train_decoder(
-            batch_real, batch_noise, batch_cond, z_real, embeds_real, kld_real
-        )
+        self.train_encoder(batch_real, batch_noise, batch_cond)
+        self.train_decoder(batch_real, batch_noise, batch_cond)
 
         return self.get_metrics_result()
 
