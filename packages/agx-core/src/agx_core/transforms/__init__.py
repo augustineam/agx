@@ -1,8 +1,10 @@
-from agx_core.transforms.image import BrightnessAndContrast
-from agx_core.transforms.deskew import Deskew, compute_deskew_perspective
+from agx_core.transforms.image import *
+from agx_core.transforms.deskew import *
 
 __all__ = [
-    "BrightnessAndContrast",
+    "BrightnessAdjustment",
+    "LogTransform",
+    "GammaCorrection",
     "Deskew",
     "compute_deskew_perspective",
 ]

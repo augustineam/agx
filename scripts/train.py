@@ -22,7 +22,7 @@ from typing import Sequence
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
-from agx_core.transforms import BrightnessAndContrast, Deskew
+from agx_core.transforms import LogTransform, Deskew
 
 
 class UnlabeledImageDataset(Dataset):
@@ -56,7 +56,7 @@ def train_transforms(img_size, mean=[0.5], std=[0.5]):
         [
             Deskew(),
             # A.Pad((25, 25), 255),
-            BrightnessAndContrast(),
+            LogTransform(epsilon=2),
             A.InvertImg(1),
             A.Resize(img_size, img_size),
             A.Affine(scale=(0.9, 0.95), rotate=(-90, 90), shear=(5, 5), p=0.5),
@@ -72,7 +72,7 @@ def valid_transforms(img_size, mean=[0.5], std=[0.5]):
         [
             Deskew(),
             # A.Pad((25, 25), 255),
-            BrightnessAndContrast(),
+            LogTransform(epsilon=2),
             A.InvertImg(1),
             A.Resize(img_size, img_size),
             A.Normalize(mean=mean, std=std),
