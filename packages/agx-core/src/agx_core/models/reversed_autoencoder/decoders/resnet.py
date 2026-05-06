@@ -33,7 +33,7 @@ class ResNetDecoder(BaseDecoder):
         name: str = "resnet_decoder",
         **kwargs,
     ):
-        super(ResNetDecoder, self).__init__(name=name, **kwargs)
+        super().__init__(name=name, **kwargs)
 
         ch_dim = 0 if keras.config.image_data_format() == "channels_first" else -1
         self.out_ch = self.target_shape[ch_dim]
@@ -94,7 +94,7 @@ class ResNetDecoder(BaseDecoder):
             block.build(x_shape)
             x_shape = block.compute_output_shape(x_shape)
 
-        super(ResNetDecoder, self).build(input_shape)
+        super().build(input_shape)
 
     def compute_output_shape(self, input_shape: Sequence[Sequence[int]]):
         x_shape, c_shape = input_shape
@@ -121,7 +121,7 @@ class ResNetDecoder(BaseDecoder):
         return self.activation(x)
 
     def get_config(self):
-        config = super(ResNetDecoder, self).get_config()
+        config = super().get_config()
         config.update(
             dict(
                 filters=self.filters,

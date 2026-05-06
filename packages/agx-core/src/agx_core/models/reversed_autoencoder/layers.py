@@ -39,7 +39,7 @@ class ConvBlock(layers.Layer):
         name="conv_block",
         **kwargs,
     ):
-        super(ConvBlock, self).__init__(name=name, **kwargs)
+        super().__init__(name=name, **kwargs)
 
         self.filters = filters
         self.kernel_size = kernel_size
@@ -71,7 +71,7 @@ class ConvBlock(layers.Layer):
         x_shape = self.conv.compute_output_shape(input_shape)
         self.norm.build(x_shape)
 
-        super(ConvBlock, self).build(input_shape)
+        super().build(input_shape)
 
     def compute_output_shape(self, input_shape: Sequence[int]) -> Sequence[int]:
         return self.conv.compute_output_shape(input_shape)
@@ -86,7 +86,7 @@ class ConvBlock(layers.Layer):
         return x
 
     def get_config(self):
-        config = super(ConvBlock, self).get_config()
+        config = super().get_config()
         config.update(
             dict(
                 filters=self.filters,
@@ -149,7 +149,7 @@ class DeConvBlock(layers.Layer):
         self.conv.build(input_shape)
         x_shape = self.conv.compute_output_shape(input_shape)
         self.norm.build(x_shape)
-        super(DeConvBlock, self).build(input_shape)
+        super().build(input_shape)
 
     def compute_output_shape(self, input_shape: Sequence[int]) -> Sequence[int]:
         return self.conv.compute_output_shape(input_shape)
@@ -195,7 +195,7 @@ class ResidualBlock(layers.Layer):
         name="residual",
         **kwargs,
     ):
-        super(ResidualBlock, self).__init__(name=name, **kwargs)
+        super().__init__(name=name, **kwargs)
         self.filters = filters
         self.bottleneck = bottleneck
         self._activation = activation
@@ -267,7 +267,7 @@ class ResidualBlock(layers.Layer):
 
         self.add.build([x_shape, y_shape])
 
-        super(ResidualBlock, self).build(input_shape)
+        super().build(input_shape)
 
     def compute_output_shape(self, input_shape: Sequence[int]) -> Sequence[int]:
         x_shape = self.conv1.compute_output_shape(input_shape)
@@ -315,7 +315,7 @@ class Reparameterization(layers.Layer):
         super().__init__(name=name, **kwargs)
 
     def build(self, input_shape: Sequence[Sequence[int]]):
-        super(Reparameterization, self).build(input_shape)
+        super().build(input_shape)
 
     def compute_output_shape(
         self, input_shape: Sequence[Sequence[int]]
@@ -431,7 +431,7 @@ class FiLM(layers.Layer):
         )
         self.gamma.build(cond_shape)
         self.beta.build(cond_shape)
-        super(FiLM, self).build(input_shape)
+        super().build(input_shape)
 
     def compute_output_shape(self, input_shape):
         return input_shape[0]

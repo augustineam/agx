@@ -25,7 +25,7 @@ class Sequential(layers.Layer):
         for layer in self._layers:
             layer.build(shape)
             shape = layer.compute_output_shape(shape)
-        super(Sequential, self).build(input_shape)
+        super().build(input_shape)
 
     def call(self, x, training=False):
         for layer in self._layers:
@@ -70,7 +70,7 @@ class Split(keras.layers.Layer):
 
     def build(self, input_shape: Sequence[int]):
         self.input_spec = keras.layers.InputSpec(shape=(None, *input_shape[1:]))
-        super(Split, self).build(input_shape)
+        super().build(input_shape)
 
     def compute_output_shape(self, input_shape: Sequence[int]):
         input_shape = list(input_shape)

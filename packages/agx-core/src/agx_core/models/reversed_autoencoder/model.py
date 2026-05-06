@@ -1,6 +1,6 @@
 import keras
 
-from typing import Sequence, Optional
+from typing import Sequence, Optional, Tuple, List, Dict
 
 from keras import metrics, Model, ops
 
@@ -30,42 +30,6 @@ def kl_divergence(mean, logvar, cap=10.0):
         axis=_channel_axis(),
     )
     return ops.minimum(kld, cap)
-
-
-# def embedding_loss(
-#     teacher_embedds: Sequence[keras.KerasTensor],
-#     student_embedds: Sequence[keras.KerasTensor],
-# ):
-#     """Feature consistency loss with depth-weighted layers.
-
-#     Deeper layers (closer to bottleneck resolution) get higher weight
-#     because their information is preservable through the VAE bottleneck.
-#     Shallow layers get lower weight because their high-resolution
-#     spatial detail is fundamentally lost in the bottleneck — demanding
-#     their reconstruction wastes gradient energy on an impossible target.
-#     """
-#     n_layers = len(teacher_embedds)
-#     total_loss = 0
-
-#     for i, (teacher_feature, student_feature) in enumerate(
-#         zip(teacher_embedds, student_embedds)
-#     ):
-#         # Exponential weighting: deepest layer = 1.0, shallowest ≈ 0
-#         # For 5 layers: weights ≈ [0.06, 0.12, 0.25, 0.50, 1.00]
-#         depth_weight = 2.0 ** (i - n_layers + 1)
-
-#         mse = ops.mean(
-#             ops.square(teacher_feature - student_feature), axis=_channel_axis()
-#         )
-#         cosine_similarity = keras.losses.cosine_similarity(
-#             teacher_feature, student_feature, axis=_channel_axis()
-#         )
-#         layer_loss = ops.mean(0.5 * mse + (1 - cosine_similarity), axis=[1, 2])
-#         total_loss += depth_weight * layer_loss
-
-#     # Normalize by sum of weights so lambda_embed remains interpretable
-#     weight_sum = sum(2.0 ** (i - n_layers + 1) for i in range(n_layers))
-#     return total_loss / weight_sum
 
 
 def embedding_loss(
@@ -119,7 +83,7 @@ class ReversedAutoencoderBase(Model):
         name: str = "reversed_autoencoder",
         **kwargs,
     ):
-        super(ReversedAutoencoderBase, self).__init__(name=name, **kwargs)
+        super().__init__(name=name, **kwargs)
 
         self.encoder = encoder
         self.decoder = decoder
@@ -216,7 +180,7 @@ class ReversedAutoencoderBase(Model):
 
         self.decoder.build([x_shape, c_shape])
 
-        super(ReversedAutoencoderBase, self).build(input_shape)
+        super().build(input_shape)
 
     def get_build_config(self):
         """Persist the two input shapes so build_from_config can rebuild optimizers."""
@@ -283,7 +247,7 @@ class ReversedAutoencoderBase(Model):
         """
         # Pass optimizer=None so the base Trainer does not create a phantom
         # rmsprop optimizer that would be saved/loaded alongside our real ones.
-        super(ReversedAutoencoderBase, self).compile(optimizer=enc_optimizer, **kwargs)
+        super().compile(optimizer=enc_optimizer, **kwargs)
         self.dec_optimizer = dec_optimizer
 
         if self.built:
@@ -350,81 +314,66 @@ class ReversedAutoencoderBase(Model):
 
         return ops.image.resize(image, self.decoder.current_output_size())
 
-    def compute_encoder_loss(self, real, noise, condition):
-        """Framework-agnostic forward pass and loss computation for the encoder."""
-        fake = self.decoder([noise, condition], training=False)
+    # ─── Shared Loss Math ────────────────────────────────────────────────
+    #
+    # Pure tensor arithmetic — no forward passes, no device logic.
+    # Backend subclasses call these after orchestrating the forward passes.
 
-        # Get the latent representations, embeddings and reconstructions for real samples
-        (mean_real, logvar_real), _ = self.encoder([real, condition], training=True)
-        z_real = self.reparameterize([mean_real, logvar_real])
-        rec_real = self.decoder([z_real, condition], training=False)
+    def _encoder_loss_from_outputs(
+        self,
+        real: keras.KerasTensor,
+        fake: keras.KerasTensor,
+        rec_real: keras.KerasTensor,
+        rec_rec: keras.KerasTensor,
+        rec_fake: keras.KerasTensor,
+        mean_real: keras.KerasTensor,
+        logvar_real: keras.KerasTensor,
+        mean_rec: keras.KerasTensor,
+        logvar_rec: keras.KerasTensor,
+        mean_fake: keras.KerasTensor,
+        logvar_fake: keras.KerasTensor,
+    ) -> Tuple[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
+        """Compute encoder loss from pre-computed forward pass outputs.
 
-        # Get the latent representations, embeddings and reconstructions for reconstructed samples
-        (mean_rec, logvar_rec), _ = self.encoder(
-            [ops.stop_gradient(rec_real), condition], training=True
-        )
-        z_rec = self.reparameterize([mean_rec, logvar_rec])
-        rec_rec = self.decoder([z_rec, condition], training=False)
+        All tensors must reside on the same device / be compatible for
+        element-wise ops. No forward passes are performed here.
 
-        # Get the latent representations and reconstructions for fake samples
-        (mean_fake, logvar_fake), _ = self.encoder(
-            [ops.stop_gradient(fake), condition], training=True
-        )
-        z_fake = self.reparameterize([mean_fake, logvar_fake])
-        rec_fake = self.decoder([z_fake, condition], training=False)
+        The encoder objective:
+        - Maximize ELBO on real samples (minimize negative ELBO)
+        - Minimize ELBO on reconstructed/fake (discriminate against them)
 
-        # For real samples, we want to maximize the ELBO by minimizing the negative
-        # ELBO for the real samples `elbo_real`.
+        Exponential curriculum weighting focuses training on the
+        hardest-to-discriminate samples: good fakes (higher ELBO) get
+        exponentially higher loss contribution.
 
-        # [N], [N], [N], [N], [N]
+        Returns:
+            (loss, metric_updates) tuple.
+        """
         logpx_z_real = -ops.mean(pixel_mse(real, rec_real), axis=[1, 2])
         kld_real = ops.mean(kl_divergence(mean_real, logvar_real), axis=[1, 2])
         elbo_real = logpx_z_real - self.beta_kld * kld_real
 
-        # For fake and reconstructed samples, we want to minimize the ELBO
-        # for the fake and reconstructed samples `elbo_fake` and `elbo_rec`,
-        # respectively, so that the encoder learns to discriminate the
-        # reconstructed and fake samples.
-
-        # [N], [N], [N], [N]
         logpx_z_rec = -ops.mean(
             pixel_mse(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
         )
         kld_rec = ops.mean(kl_divergence(mean_rec, logvar_rec), axis=[1, 2])
         elbo_rec = logpx_z_rec - self.beta_kld * kld_rec
 
-        # [N], [N], [N], [N]
         logpx_z_fake = -ops.mean(
             pixel_mse(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
         )
         kld_fake = ops.mean(kl_divergence(mean_fake, logvar_fake), axis=[1, 2])
         elbo_fake = logpx_z_fake - self.beta_kld * kld_fake
 
-        # Exponential curriculum weighting: focus training on hardest-to-discriminate samples
-        # Good fakes (higher ELBO, closer to 0) get exponentially higher loss contribution
-        # Bad fakes (lower ELBO, more negative) get exponentially lower loss contribution
-        # This creates adaptive curriculum learning where the encoder progressively focuses
-        # on subtler discrimination tasks as the decoder improves
-
-        # [N], [N]
         expelbo_rec = ops.exp(self.expelbo_temp * elbo_rec)
         expelbo_fake = ops.exp(self.expelbo_temp * elbo_fake)
 
         loss = ops.mean(-elbo_real + 0.5 * (expelbo_rec + expelbo_fake))
 
-        # Track KLD gap between decoder's (fake + rec) / 2 and real samples as an adversarial
-        # equilibrium diagnostic:
-        #   diff_kld = 0.5 * (kld_fake + kld_rec) - kld_real
-        #
-        #   > 0 (large): Encoder dominates — fakes need far more specialized
-        #                encodings than reals. Decoder is underperforming.
-        #   > 0 (small): Approaching equilibrium — decoder produces fakes
-        #                that are nearly as "normal" as reals to the encoder.
-        #   ≈ 0:         Nash equilibrium — encoder cannot distinguish fakes
-        #                from reals via KLD alone. Decoder has succeeded.
-        #   < 0:         Pathological — encoder finds fakes more normal than
-        #                reals. Indicates training instability.
-
+        # diff_kld: adversarial equilibrium diagnostic
+        #   > 0: encoder dominant, decoder underperforming
+        #   ≈ 0: Nash equilibrium
+        #   < 0: pathological, training instability
         diff_kld = 0.5 * (kld_fake + kld_rec) - kld_real
 
         metric_updates = dict(
@@ -443,87 +392,49 @@ class ReversedAutoencoderBase(Model):
 
         return loss, metric_updates
 
-    def compute_decoder_loss(
+    def _decoder_loss_from_outputs(
         self,
         real: keras.KerasTensor,
-        noise: keras.KerasTensor,
-        condition: keras.KerasTensor,
-    ):
-        """Train the decoder to generate realistic samples and fool the encoder.
+        rec_real: keras.KerasTensor,
+        rec_rec: keras.KerasTensor,
+        rec_fake: keras.KerasTensor,
+        fake: keras.KerasTensor,
+        mean_rec: keras.KerasTensor,
+        logvar_rec: keras.KerasTensor,
+        mean_fake: keras.KerasTensor,
+        logvar_fake: keras.KerasTensor,
+        embeds_real: List[keras.KerasTensor],
+        embeds_rec: List[keras.KerasTensor],
+        kld_real: keras.KerasTensor,
+    ) -> Tuple[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
+        """Compute decoder loss from pre-computed forward pass outputs.
 
-        The decoder is trained to:
-        - Maximize ELBO on real samples to minimize the reconstruction loss
-        - Maximize ELBO on reconstructed and fake samples (fool the encoder)
-        - Minimize embedding loss to maintain feature consistency
+        All tensors must reside on the same device / be compatible for
+        element-wise ops. No forward passes are performed here.
 
-        Args:
-            real: Batch of real input images
-            noise: Random noise for generating fake samples
-            condition: Conditioning information
-            z_real: Latent codes from real samples (from encoder training)
-            embeds_real: Feature embeddings from real samples
-            kld_real: KL divergence from real samples
+        The decoder objective:
+        - Maximize ELBO on real samples (good reconstructions)
+        - Maximize ELBO on rec/fake samples (fool the encoder)
+        - Minimize embedding loss (feature consistency with encoder)
+
+        Embedding loss measures feature consistency between E(I) and E(I')
+        in the encoder's native feature space. The encoder acts as a frozen
+        perceptual critic — at inference, anomaly score = distance(E(I), E(I')).
+
+        Returns:
+            (loss, metric_updates) tuple.
         """
-
-        (mean_real, logvar_real), embeds_real = self.encoder(
-            [real, condition], training=False
-        )
-        z_real = self.reparameterize([mean_real, logvar_real])
-        kld_real = ops.mean(kl_divergence(mean_real, logvar_real), axis=[1, 2])
-
-        # Detach all encoder outputs — no gradient should flow back
-        z_real = ops.stop_gradient(z_real)
-        embeds_real = [ops.stop_gradient(embed) for embed in embeds_real]
-        kld_real = ops.stop_gradient(kld_real)
-
-        # Generate fake samples and reconstruct real samples
-        fake = self.decoder([noise, condition], training=True)
-        rec_real = self.decoder([ops.stop_gradient(z_real), condition], training=True)
-
-        # Get latent representations and embeddings for reconstructed samples
-        (mean_rec, logvar_rec), embeds_rec = self.encoder(
-            [rec_real, condition], training=False
-        )
-        z_rec = self.reparameterize([mean_rec, logvar_rec])
-        rec_rec = self.decoder([ops.stop_gradient(z_rec), condition], training=True)
-
-        # Get latent representations for fake samples
-        (mean_fake, logvar_fake), _ = self.encoder([fake, condition], training=False)
-        z_fake = self.reparameterize([mean_fake, logvar_fake])
-        rec_fake = self.decoder([ops.stop_gradient(z_fake), condition], training=True)
-
-        # Embedding loss (decoder only): measures feature consistency between
-        # E(I) and E(I') in the encoder's native feature space.
-        #
-        # The encoder acts as a frozen perceptual critic — its intermediate
-        # features define the space where we measure reconstruction fidelity.
-        # By training only the decoder with this signal, we preserve the
-        # encoder's anomaly sensitivity: it remains free to produce divergent
-        # embeddings for anomalous inputs, while the decoder is pushed to
-        # always reconstruct "healthy" images that re-encode faithfully.
-        #
-        # At inference, anomaly score = distance(E(I), E(I')), which is
-        # high precisely because the encoder was never trained to suppress
-        # that difference.
-        # [N]
-        embeds_real = [ops.stop_gradient(embed) for embed in embeds_real]
         embed_loss = embedding_loss(embeds_real, embeds_rec)
 
-        # Here we want to maximize the ELBOs for the real and fake samples,
-        # to guide the decoder to generate realistic samples.
-
-        # [N], [N]
         logpx_z_real = -ops.mean(pixel_mse(real, rec_real), axis=[1, 2])
         elbo_real = logpx_z_real - self.beta_kld * ops.stop_gradient(kld_real)
 
-        # [N], [N], [N], [N], [N]
         logpx_z_rec = -ops.mean(
             pixel_mse(ops.stop_gradient(rec_real), rec_rec), axis=[1, 2]
         )
         kld_rec = ops.mean(kl_divergence(mean_rec, logvar_rec), axis=[1, 2])
         elbo_rec = logpx_z_rec - self.beta_kld * ops.stop_gradient(kld_rec)
 
-        # [N], [N], [N], [N], [N]
         logpx_z_fake = -ops.mean(
             pixel_mse(ops.stop_gradient(fake), rec_fake), axis=[1, 2]
         )
@@ -535,6 +446,94 @@ class ReversedAutoencoderBase(Model):
         )
 
         return loss, dict(loss_dec=loss, loss_embed=embed_loss)
+
+    # ─── Default Forward Orchestration ────────────────────────────────
+    #
+    # Single-device reference implementation. Backend subclasses override
+    # compute_encoder_loss / compute_decoder_loss for device placement
+    # and grad-context control, then delegate to the shared math above.
+
+    def compute_encoder_loss(self, real, noise, condition, training: bool = True):
+        """Encoder loss: single-device reference implementation.
+
+        Override in backend subclasses for multi-GPU device orchestration.
+        """
+        fake = self.decoder([noise, condition], training=False)
+
+        (mean_real, logvar_real), _ = self.encoder([real, condition], training=training)
+        z_real = self.reparameterize([mean_real, logvar_real])
+        rec_real = self.decoder([z_real, condition], training=False)
+
+        (mean_rec, logvar_rec), _ = self.encoder(
+            [ops.stop_gradient(rec_real), condition], training=training
+        )
+        z_rec = self.reparameterize([mean_rec, logvar_rec])
+        rec_rec = self.decoder([z_rec, condition], training=False)
+
+        (mean_fake, logvar_fake), _ = self.encoder(
+            [ops.stop_gradient(fake), condition], training=training
+        )
+        z_fake = self.reparameterize([mean_fake, logvar_fake])
+        rec_fake = self.decoder([z_fake, condition], training=False)
+
+        return self._encoder_loss_from_outputs(
+            real,
+            fake,
+            rec_real,
+            rec_rec,
+            rec_fake,
+            mean_real,
+            logvar_real,
+            mean_rec,
+            logvar_rec,
+            mean_fake,
+            logvar_fake,
+        )
+
+    def compute_decoder_loss(self, real, noise, condition, training: bool = True):
+        """Decoder loss: single-device reference implementation.
+
+        Override in backend subclasses for multi-GPU device orchestration.
+        """
+        (mean_real, logvar_real), embeds_real = self.encoder(
+            [real, condition], training=False
+        )
+        z_real = self.reparameterize([mean_real, logvar_real])
+        kld_real = ops.mean(kl_divergence(mean_real, logvar_real), axis=[1, 2])
+
+        z_real = ops.stop_gradient(z_real)
+        embeds_real = [ops.stop_gradient(e) for e in embeds_real]
+        kld_real = ops.stop_gradient(kld_real)
+
+        fake = self.decoder([noise, condition], training=training)
+        rec_real = self.decoder([z_real, condition], training=training)
+
+        (mean_rec, logvar_rec), embeds_rec = self.encoder(
+            [rec_real, condition], training=False
+        )
+        z_rec = self.reparameterize([mean_rec, logvar_rec])
+        rec_rec = self.decoder([ops.stop_gradient(z_rec), condition], training=training)
+
+        (mean_fake, logvar_fake), _ = self.encoder([fake, condition], training=False)
+        z_fake = self.reparameterize([mean_fake, logvar_fake])
+        rec_fake = self.decoder(
+            [ops.stop_gradient(z_fake), condition], training=training
+        )
+
+        return self._decoder_loss_from_outputs(
+            real,
+            rec_real,
+            rec_rec,
+            rec_fake,
+            fake,
+            mean_rec,
+            logvar_rec,
+            mean_fake,
+            logvar_fake,
+            embeds_real,
+            embeds_rec,
+            kld_real,
+        )
 
     def train_encoder(
         self,
@@ -628,86 +627,65 @@ class ReversedAutoencoderBase(Model):
         noise = self.noise(batch_size)
         real = self.resize_progressive_output(real)
 
-        # Generate fake samples
+        # Forward passes (all no-grad at eval time)
         fake = self.decoder([noise, cond], training=False)
 
-        # Get latent representations, embeddings and reconstruction for real samples
         (mean_real, logvar_real), embeds_real = self.encoder(
             [real, cond], training=False
         )
         z_real = self.reparameterize([mean_real, logvar_real])
         rec_real = self.decoder([z_real, cond], training=False)
 
-        # Get mu, logvar parameters of the latent representations and embeddings for the real reconstructed samples
         (mean_rec, logvar_rec), embeds_rec = self.encoder(
             [rec_real, cond], training=False
         )
         z_rec = self.reparameterize([mean_rec, logvar_rec])
         rec_rec = self.decoder([z_rec, cond], training=False)
 
-        # Get mu, logvar parameters of the latent representations of the fake samples
         (mean_fake, logvar_fake), _ = self.encoder([fake, cond], training=False)
         z_fake = self.reparameterize([mean_fake, logvar_fake])
         rec_fake = self.decoder([z_fake, cond], training=False)
 
-        # Compute embedding loss between the real and reconstructed samples
-        loss_embed = embedding_loss(embeds_real, embeds_rec)
-
-        # [N], [N], [N], [N], [N]
+        # Delegate to shared loss math
         kld_real = ops.mean(kl_divergence(mean_real, logvar_real), axis=[1, 2])
-        kld_rec = ops.mean(kl_divergence(mean_rec, logvar_rec), axis=[1, 2])
-        kld_fake = ops.mean(kl_divergence(mean_fake, logvar_fake), axis=[1, 2])
 
-        logpx_z_real = -ops.mean(pixel_mse(real, rec_real), axis=[1, 2])
-        elbo_real = logpx_z_real - self.beta_kld * kld_real
-
-        logpx_z_rec = -ops.mean(pixel_mse(rec_real, rec_rec), axis=[1, 2])
-        elbo_rec = logpx_z_rec - self.beta_kld * kld_rec
-
-        logpx_z_fake = -ops.mean(pixel_mse(fake, rec_fake), axis=[1, 2])
-        elbo_fake = logpx_z_fake - self.beta_kld * kld_fake
-
-        # [N], [N]
-        expelbo_rec = ops.exp(self.expelbo_temp * elbo_rec)
-        expelbo_fake = ops.exp(self.expelbo_temp * elbo_fake)
-
-        loss_enc = ops.mean(-elbo_real + 0.5 * (expelbo_rec + expelbo_fake))
-        loss_dec = ops.mean(
-            -elbo_real - 0.5 * (elbo_rec + elbo_fake) + self.lambda_embed * loss_embed
+        _, enc_metrics = self._encoder_loss_from_outputs(
+            real,
+            fake,
+            rec_real,
+            rec_rec,
+            rec_fake,
+            mean_real,
+            logvar_real,
+            mean_rec,
+            logvar_rec,
+            mean_fake,
+            logvar_fake,
         )
 
-        self.elbo_real_tracker.update_state(elbo_real)
-        self.elbo_rec_tracker.update_state(elbo_rec)
-        self.elbo_fake_tracker.update_state(elbo_fake)
-        self.expelbo_rec_tracker.update_state(expelbo_rec)
-        self.expelbo_fake_tracker.update_state(expelbo_fake)
-        self.loss_enc_tracker.update_state(loss_enc)
-        self.loss_dec_tracker.update_state(loss_dec)
-        self.loss_rec_tracker.update_state(-logpx_z_real)
-        self.loss_embed_tracker.update_state(loss_embed)
-        self.kld_real_tracker.update_state(kld_real)
-        self.kld_rec_tracker.update_state(kld_rec)
-        self.kld_fake_tracker.update_state(kld_fake)
-        self.diff_kld_tracker.update_state(0.5 * (kld_fake + kld_rec) - kld_real)
-
-        return dict(
-            elbo_real=self.elbo_real_tracker.result(),
-            elbo_rec=self.elbo_rec_tracker.result(),
-            elbo_fake=self.elbo_fake_tracker.result(),
-            expelbo_rec=self.expelbo_rec_tracker.result(),
-            expelbo_fake=self.expelbo_fake_tracker.result(),
-            loss_enc=self.loss_enc_tracker.result(),
-            loss_dec=self.loss_dec_tracker.result(),
-            loss_rec=self.loss_rec_tracker.result(),
-            loss_embed=self.loss_embed_tracker.result(),
-            diff_kld=self.diff_kld_tracker.result(),
-            kld_real=self.kld_real_tracker.result(),
-            kld_rec=self.kld_rec_tracker.result(),
-            kld_fake=self.kld_fake_tracker.result(),
+        _, dec_metrics = self._decoder_loss_from_outputs(
+            real,
+            rec_real,
+            rec_rec,
+            rec_fake,
+            fake,
+            mean_rec,
+            logvar_rec,
+            mean_fake,
+            logvar_fake,
+            embeds_real,
+            embeds_rec,
+            kld_real,
         )
+
+        # Update all trackers
+        self.update_step_metrics(enc_metrics)
+        self.update_step_metrics(dec_metrics)
+
+        return self.get_metrics_result()
 
     def get_config(self):
-        config = super(ReversedAutoencoderBase, self).get_config()
+        config = super().get_config()
         config.update(
             dict(
                 encoder=keras.saving.serialize_keras_object(self.encoder),

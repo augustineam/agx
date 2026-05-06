@@ -27,9 +27,7 @@ class MobileNetV3SmallEncoder(BaseEncoder):
         name: str = "mbnetv3_encoder",
         **kwargs,
     ):
-        super(MobileNetV3SmallEncoder, self).__init__(
-            latent_size=latent_size, name=name, **kwargs
-        )
+        super().__init__(latent_size=latent_size, name=name, **kwargs)
         self.progressive = progressive
         self.rgb_activation = rgb_activation
         self._initial_stage = initial_stage
@@ -61,6 +59,14 @@ class MobileNetV3SmallEncoder(BaseEncoder):
 
         self._current_stage += 1
         self._alpha = 0.0
+
+    def training_enabled(self, training: bool):
+        super().training_enabled(training)
+
+        for idx, from_rgb in enumerate(self.from_rgb):
+            from_rgb.trainable = (
+                self.current_stage == idx and training and self.progressive
+            )
 
     def build(self, input_shape: Sequence[Sequence[int]]):
         x_shape, c_shape = input_shape
@@ -170,7 +176,7 @@ class MobileNetV3SmallEncoder(BaseEncoder):
 
         self.to_latent.build([x_shape, c_shape])
 
-        super(MobileNetV3SmallEncoder, self).build(input_shape)
+        super().build(input_shape)
 
     def compute_output_shape(self, input_shape):
         x_shape, _ = input_shape
@@ -259,7 +265,7 @@ class MobileNetV3SmallEncoder(BaseEncoder):
         return self._stage_resolutions[len(self.stages) - 1 - self.current_stage]
 
     def get_config(self):
-        config = super(MobileNetV3SmallEncoder, self).get_config()
+        config = super().get_config()
         config.update(
             dict(
                 progressive=self.progressive,

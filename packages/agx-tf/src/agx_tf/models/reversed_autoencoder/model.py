@@ -29,7 +29,7 @@ class ReversedAutoencoder(ReversedAutoencoderBase):
         name: str = "reversed_autoencoder",
         **kwargs,
     ):
-        super(ReversedAutoencoder, self).__init__(
+        super().__init__(
             encoder,
             decoder,
             reparameterize,

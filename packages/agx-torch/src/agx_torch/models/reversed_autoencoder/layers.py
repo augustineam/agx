@@ -20,7 +20,7 @@ class Reparameterization(keras.layers.Layer):
         super().__init__(name=name, **kwargs)
 
     def build(self, input_shape: Sequence[Sequence[int]]):
-        super(Reparameterization, self).build(input_shape)
+        super().build(input_shape)
 
     def compute_output_shape(
         self, input_shape: Sequence[Sequence[int]]

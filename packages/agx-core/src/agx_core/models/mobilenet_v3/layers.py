@@ -48,7 +48,7 @@ class SqueezeExcite(layers.Layer):
         x_shape = self.reduce.compute_output_shape(x_shape)
         self.expand.build(x_shape)
 
-        super(SqueezeExcite, self).build(input_shape)
+        super().build(input_shape)
 
     def call(self, x, training=None):
         scale = self.pool(x)
@@ -173,7 +173,7 @@ class InvertedResidualBlock(layers.Layer):
         x_shape = self.project_conv.compute_output_shape(x_shape)
         self.project_norm.build(x_shape)
 
-        super(InvertedResidualBlock, self).build(input_shape)
+        super().build(input_shape)
 
     def compute_output_shape(self, input_shape):
         shape = list(input_shape)

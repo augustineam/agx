@@ -17,7 +17,7 @@ class BaseEncoder(keras.layers.Layer, ABC):
     ):
         self._latent_size = latent_size
         self._latent_spatial_res = latent_spatial_res
-        super(BaseEncoder, self).__init__(name=name, **kwargs)
+        super().__init__(name=name, **kwargs)
 
     @property
     def latent_size(self):
@@ -57,6 +57,9 @@ class BaseEncoder(keras.layers.Layer, ABC):
 
         return mu_shape, mu_shape
 
+    def training_enabled(self, training: bool):
+        self.trainable = training
+
     @abstractmethod
     def call(
         self, inputs: Sequence[keras.KerasTensor], training: bool | None = None
@@ -69,7 +72,7 @@ class BaseEncoder(keras.layers.Layer, ABC):
         pass
 
     def get_config(self):
-        config = super(BaseEncoder, self).get_config()
+        config = super().get_config()
         config.update(
             dict(
                 latent_size=self.latent_size, latent_spatial_res=self.latent_spatial_res
@@ -86,12 +89,15 @@ class BaseDecoder(keras.layers.Layer):
         name="base_decoder",
         **kwargs,
     ):
-        super(BaseDecoder, self).__init__(name=name, **kwargs)
+        super().__init__(name=name, **kwargs)
 
         if target_shape is None or len(target_shape) != 3:
             raise ValueError("target_shape must be (H, W, C) or (C, H, W)")
 
         self.target_shape = target_shape
+
+    def training_enabled(self, training: bool):
+        self.trainable = training
 
     @abstractmethod
     def call(
@@ -105,7 +111,7 @@ class BaseDecoder(keras.layers.Layer):
         pass
 
     def get_config(self):
-        config = super(BaseDecoder, self).get_config()
+        config = super().get_config()
         config.update(dict(target_shape=self.target_shape))
         return config
 

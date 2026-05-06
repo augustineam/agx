@@ -34,9 +34,7 @@ class MobileNetV3SmallDecoder(BaseDecoder):
         name: str = "mbnetv3_decoder",
         **kwargs,
     ):
-        super(MobileNetV3SmallDecoder, self).__init__(
-            target_shape=target_shape, name=name, **kwargs
-        )
+        super().__init__(target_shape=target_shape, name=name, **kwargs)
 
         self.rgb_activation = rgb_activation
         self.progressive = progressive
@@ -69,6 +67,12 @@ class MobileNetV3SmallDecoder(BaseDecoder):
 
         self._current_stage += 1
         self._alpha = 0.0
+
+    def training_enabled(self, training: bool):
+        super().training_enabled(training)
+
+        for idx, to_rgb in enumerate(self.to_rgb):
+            to_rgb.trainable = self.current_stage == idx and training
 
     def build(self, input_shape):
         x_shape, c_shape = input_shape
@@ -176,7 +180,7 @@ class MobileNetV3SmallDecoder(BaseDecoder):
             x_shape = stage.compute_output_shape(x_shape)
             self.to_rgb[idx].build(x_shape)
 
-        super(MobileNetV3SmallDecoder, self).build(input_shape)
+        super().build(input_shape)
 
     def compute_output_shape(self, input_shape):
         x_shape, c_shape = input_shape
@@ -236,7 +240,7 @@ class MobileNetV3SmallDecoder(BaseDecoder):
         return (h // reduction, w // reduction)
 
     def get_config(self):
-        config = super(MobileNetV3SmallDecoder, self).get_config()
+        config = super().get_config()
         config.update(
             {
                 "rgb_activation": self.rgb_activation,

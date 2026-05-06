@@ -31,7 +31,7 @@ class ResNetEncoder(BaseEncoder):
         name: str = "resnet_encoder",
         **kwargs,
     ):
-        super(ResNetEncoder, self).__init__(name=name, **kwargs)
+        super().__init__(name=name, **kwargs)
         self.filters = filters
 
     def build(self, input_shape: Sequence[Sequence[int]]):
@@ -71,7 +71,7 @@ class ResNetEncoder(BaseEncoder):
         x_shape = self.conv.compute_output_shape(x_shape)
         self.split.build(x_shape)
 
-        super(ResNetEncoder, self).build(input_shape)
+        super().build(input_shape)
 
     def compute_output_shape(self, input_shape):
         x_shape, _ = input_shape
@@ -116,7 +116,7 @@ class ResNetEncoder(BaseEncoder):
         return (mean, logvar), embeddings
 
     def get_config(self):
-        config = super(ResNetEncoder, self).get_config()
+        config = super().get_config()
         config.update(dict(filters=self.filters))
         return config
 
