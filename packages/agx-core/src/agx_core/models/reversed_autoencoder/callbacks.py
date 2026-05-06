@@ -380,8 +380,8 @@ class ProgressiveGrowingCallback(keras.callbacks.Callback):
 
         self._total_steps += 1
 
-        # Pause progressive schedule while equilibrium has one side frozen
-        if not (self.model.train_encoder_enabled and self.model.train_decoder_enabled):
+        # Pause progressive schedule while equilibrium has encoder side frozen
+        if not self.model.train_encoder_enabled:
             return
 
         self._phase_step += 1

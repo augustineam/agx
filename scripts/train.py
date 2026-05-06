@@ -2,6 +2,14 @@
 import os
 
 os.environ["KERAS_BACKEND"] = "torch"
+# Prevent OpenCV from attempting to load a Qt/xcb GUI plugin in a
+# headless / multi-threaded environment (DataLoader workers).
+os.environ.setdefault("DISPLAY", ":0")
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+import matplotlib
+
+matplotlib.use("Agg")  # non-interactive, file-only backend – must be before pyplot
 
 import keras
 import torch
@@ -47,7 +55,7 @@ def train_transforms(img_size, mean=[0.5], std=[0.5]):
     return A.Compose(
         [
             Deskew(),
-            A.Pad((25, 25), 255),
+            # A.Pad((25, 25), 255),
             BrightnessAndContrast(),
             A.InvertImg(1),
             A.Resize(img_size, img_size),
@@ -63,7 +71,7 @@ def valid_transforms(img_size, mean=[0.5], std=[0.5]):
     return A.Compose(
         [
             Deskew(),
-            A.Pad((25, 25), 255),
+            # A.Pad((25, 25), 255),
             BrightnessAndContrast(),
             A.InvertImg(1),
             A.Resize(img_size, img_size),
@@ -85,13 +93,9 @@ res = img_size // 2**5
 img_shape = (None, img_size, img_size, 1)
 cond_shape = (None, res, res, 1)
 
-enc = MobileNetV3SmallEncoder(latent_size=512, progressive=True)
-dec = MobileNetV3SmallDecoder(target_shape=img_shape[1:], progressive=True)
-
 # %%
-train_path = Path("../data/products/LaTuaPastaGlassJars/Clean/train/")
-valid_path = Path("../data/products/LaTuaPastaGlassJars/Clean/val/")
-test_path = Path("../data/products/LaTuaPastaGlassJars/Test/images/train/")
+train_path = Path("./data/products/LaTuaPastaGlassJars/Clean/train/")
+valid_path = Path("./data/products/LaTuaPastaGlassJars/Clean/val/")
 
 ds_train = UnlabeledImageDataset(
     train_path, transform=train_transforms(img_size), cond_shape=cond_shape[1:]
@@ -99,17 +103,21 @@ ds_train = UnlabeledImageDataset(
 ds_valid = UnlabeledImageDataset(
     valid_path, transform=valid_transforms(img_size), cond_shape=cond_shape[1:]
 )
-ds_test = UnlabeledImageDataset(
-    test_path, transform=valid_transforms(img_size), cond_shape=cond_shape[1:]
-)
 
 # %%
 from keras.optimizers import Adam
 
-ra = ReversedAutoencoder(enc, dec, beta_kld=0.1, freeze_backbone=False)
-ra.build([img_shape, cond_shape])
-ra.place_on_devices("cuda:0", "cuda:1")
-ra.compile(Adam(learning_rate=7e-6), Adam(learning_rate=1e-4))
+ra_model = Path("ra_mbnetv3.model.keras")
+if ra_model.exists():
+    ra: ReversedAutoencoder = keras.models.load_model(ra_model)
+    ra.place_on_devices("cuda:0", "cuda:1")
+else:
+    enc = MobileNetV3SmallEncoder(latent_size=512, progressive=True)
+    dec = MobileNetV3SmallDecoder(target_shape=img_shape[1:], progressive=True)
+    ra = ReversedAutoencoder(enc, dec, beta_kld=0.1, freeze_backbone=False)
+    ra.build([img_shape, cond_shape])
+    ra.place_on_devices("cuda:0", "cuda:1")
+    ra.compile(Adam(learning_rate=7e-6), Adam(learning_rate=1e-2))
 
 ra.summary()
 
@@ -208,7 +216,7 @@ from agx_core.models.reversed_autoencoder.callbacks import (
 
 callbacks = [
     AdversarialEquilibriumCallback(0.3, -0.5, min_pause_steps=100),
-    ProgressiveGrowingCallback(2000, 2000),
+    ProgressiveGrowingCallback(20000, 20000),
     ModelCheckpoint(
         filepath="ra_mbnetv3.best.keras",
         monitor="val_loss_rec",

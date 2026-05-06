@@ -203,6 +203,11 @@ class ReversedAutoencoderBase(Model):
         """
         self._img_shape = tuple(config["img_shape"])
         self._cond_shape = tuple(config["cond_shape"])
+
+        x_shape, _ = self.encoder.compute_output_shape(
+            [self._img_shape, self._cond_shape]
+        )
+        self._latent_shape = x_shape[0]
         self.built = True
 
     def _build_optimizers_if_needed(self):

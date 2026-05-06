@@ -78,6 +78,8 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
         self.encoder.to(self._enc_device)
         self.reparameterize.to(self._enc_device)
         self.decoder.to(self._dec_device)
+
+        self._build_optimizers_if_needed()
         return self
 
     @property
@@ -108,9 +110,17 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
             with device_scope(str(self._enc_device)):
                 self.enc_optimizer.build(self.encoder.variables)
 
+        if self.enc_optimizer is not None:
+            # Relocate scalar optimizer state (iteration, lr) to dec_device
+            for v in self.enc_optimizer.variables:
+                if v.value.device != self._enc_device:
+                    v.value.data = v.value.data.to(self._enc_device)
+
         if self.dec_optimizer is not None and not self.dec_optimizer.built:
             with device_scope(str(self._dec_device)):
                 self.dec_optimizer.build(self.decoder.variables)
+
+        if self.dec_optimizer is not None:
             # Relocate scalar optimizer state (iteration, lr) to dec_device
             for v in self.dec_optimizer.variables:
                 if v.value.device != self._dec_device:
