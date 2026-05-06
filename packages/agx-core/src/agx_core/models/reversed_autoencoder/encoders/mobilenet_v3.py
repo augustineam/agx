@@ -63,10 +63,14 @@ class MobileNetV3SmallEncoder(BaseEncoder):
     def training_enabled(self, training: bool):
         super().training_enabled(training)
 
+        start_stage_index = len(self.stages) - 1 - self.current_stage
+
         for idx, from_rgb in enumerate(self.from_rgb):
-            from_rgb.trainable = (
-                self.current_stage == idx and training and self.progressive
-            )
+            from_rgb.trainable = (idx == start_stage_index) and training
+
+        if self.progressive and training:
+            for stage in self.stages[:start_stage_index]:
+                stage.trainable = False
 
     def build(self, input_shape: Sequence[Sequence[int]]):
         x_shape, c_shape = input_shape

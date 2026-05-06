@@ -74,6 +74,11 @@ class MobileNetV3SmallDecoder(BaseDecoder):
         for idx, to_rgb in enumerate(self.to_rgb):
             to_rgb.trainable = self.current_stage == idx and training
 
+        if self.progressive and training:
+            curr = self.current_stage
+            for stage in self.stages[curr + 1 :]:
+                stage.trainable = False
+
     def build(self, input_shape):
         x_shape, c_shape = input_shape
 
