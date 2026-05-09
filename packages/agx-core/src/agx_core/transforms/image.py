@@ -43,7 +43,7 @@ class LogTransform(ImageOnlyTransform):
             dense = dark in raw image). If False, applies log directly.
     """
 
-    def __init__(self, epsilon: float = 1.0, invert: bool = False, p: float = 1.0):
+    def __init__(self, epsilon: float = 1.0, invert: bool = True, p: float = 1.0):
         super().__init__(p=p)
         self.epsilon = epsilon
         self.invert = invert

@@ -56,8 +56,7 @@ def train_transforms(img_size, mean=[0.5], std=[0.5]):
         [
             Deskew(),
             # A.Pad((25, 25), 255),
-            LogTransform(epsilon=2),
-            A.InvertImg(1),
+            LogTransform(epsilon=1, invert=True),
             A.Resize(img_size, img_size),
             A.Affine(scale=(0.9, 0.95), rotate=(-90, 90), shear=(5, 5), p=0.5),
             A.RandomRotate90(0.5),
@@ -72,8 +71,7 @@ def valid_transforms(img_size, mean=[0.5], std=[0.5]):
         [
             Deskew(),
             # A.Pad((25, 25), 255),
-            LogTransform(epsilon=2),
-            A.InvertImg(1),
+            LogTransform(epsilon=1, invert=True),
             A.Resize(img_size, img_size),
             A.Normalize(mean=mean, std=std),
         ]
@@ -81,12 +79,6 @@ def valid_transforms(img_size, mean=[0.5], std=[0.5]):
 
 
 # %%
-from agx_core.models.reversed_autoencoder import (
-    MobileNetV3SmallEncoder,
-    MobileNetV3SmallDecoder,
-)
-from agx_torch.models.reversed_autoencoder.model import ReversedAutoencoder
-
 img_size = 224
 res = img_size // 2**5
 
@@ -107,6 +99,15 @@ ds_valid = UnlabeledImageDataset(
 # %%
 from keras.optimizers import Adam
 
+from agx_core.models.reversed_autoencoder import (
+    MobileNetV3SmallEncoder,
+    MobileNetV3SmallDecoder,
+)
+from agx_core.models.reversed_autoencoder.model import pixel_mse
+from agx_torch.models.reversed_autoencoder.model import ReversedAutoencoder
+
+spatial_temperature = 8.0
+
 ra_model = Path("ra_mbnetv3.model.keras")
 if ra_model.exists():
     ra: ReversedAutoencoder = keras.models.load_model(ra_model)
@@ -115,11 +116,15 @@ else:
     enc = MobileNetV3SmallEncoder(latent_size=512, progressive=True)
     dec = MobileNetV3SmallDecoder(target_shape=img_shape[1:], progressive=True)
     ra = ReversedAutoencoder(
-        enc, dec, beta_kld=0.1, spatial_temperature=5.0, freeze_backbone=False
+        enc,
+        dec,
+        beta_kld=0.1,
+        spatial_temperature=spatial_temperature,
+        freeze_backbone=False,
     )
     ra.build([img_shape, cond_shape])
     ra.place_on_devices("cuda:0", "cuda:1")
-    ra.compile(Adam(learning_rate=7e-6), Adam(learning_rate=1e-2))
+    ra.compile(Adam(learning_rate=5e-7), Adam(learning_rate=1e-4))
 
 ra.summary()
 
@@ -133,7 +138,7 @@ from typing import Optional, Dict, Any
 rec_dir = Path("reconstructions")
 rec_dir.mkdir(exist_ok=True)
 
-plot_every = 50
+plot_every = 25
 rec_test_samples = 10
 (samples, labels), _ = next(iter(loader_valid))
 
@@ -144,8 +149,13 @@ def plot_on_step_end(step: int, logs: Optional[Dict[str, Any]] = None):
         return
 
     with torch.no_grad():
-        reconstructed = ra([samples, labels]).cpu().numpy()
-    samples_resized = ra.resize_progressive_output(samples).cpu().numpy()
+        reconstructed = ra([samples, labels])
+        samples_resized = ra.resize_progressive_output(samples)
+        error = pixel_mse(samples_resized, reconstructed, spatial_temperature)
+
+    samples_resized = samples_resized.cpu().numpy()
+    reconstructed = reconstructed.cpu().numpy()
+    error = error.cpu().numpy()
 
     height, width = samples_resized.shape[1:3]
     ar = width / height
@@ -164,9 +174,7 @@ def plot_on_step_end(step: int, logs: Optional[Dict[str, Any]] = None):
     if rec_test_samples == 1:
         axs = axs.reshape(1, -1)
 
-    for row, (real, rec) in enumerate(zip(samples_resized, reconstructed)):
-        rec = np.clip(rec, 0, 1)
-        mae = np.abs(rec - real)
+    for row, (real, rec, err) in enumerate(zip(samples_resized, reconstructed, error)):
 
         if row == 0:
             axs[row, 0].set_title("Original", fontsize=12, pad=15)
@@ -188,9 +196,9 @@ def plot_on_step_end(step: int, logs: Optional[Dict[str, Any]] = None):
             axs[row, col].set_xticks([])
             axs[row, col].set_yticks([])
 
-        axs[row, 0].imshow(real, cmap="gray", vmax=1)
-        axs[row, 1].imshow(rec, cmap="gray", vmax=1)
-        axs[row, 2].imshow(mae, cmap="inferno", vmax=1)
+        axs[row, 0].imshow(real, cmap="gray")
+        axs[row, 1].imshow(rec, cmap="gray")
+        axs[row, 2].imshow(err, cmap="inferno")
 
     epoch_num = step + 1
     filename = f"epoch_{epoch_num:05d}.jpg"
@@ -217,7 +225,7 @@ from agx_core.models.reversed_autoencoder.callbacks import (
 )
 
 callbacks = [
-    AdversarialEquilibriumCallback(0.3, -0.5, min_pause_steps=100),
+    AdversarialEquilibriumCallback(0.5, -0.5, min_pause_steps=200),
     ProgressiveGrowingCallback(20000, 20000),
     ModelCheckpoint(
         filepath="ra_mbnetv3.best.keras",

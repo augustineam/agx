@@ -297,17 +297,20 @@ class ProgressiveGrowingCallback(keras.callbacks.Callback):
         self,
         fade_in_steps: int = 5000,
         stabilize_steps: int = 5000,
+        fade_in_expelbo_factor: float = 0.25,
         verbose: bool = True,
     ):
         super().__init__()
         self.fade_in_steps = fade_in_steps
         self.stabilize_steps = stabilize_steps
+        self.fade_in_expelbo_factor = fade_in_expelbo_factor
         self.verbose = verbose
 
         # Internal counters
-        self._phase: str = "stabilize"  # "fade_in" | "stabilize"
+        self._phase: str = "stabilize"
         self._phase_step: int = 0
         self._total_steps: int = 0
+        self._base_dec_expelbo_temp: float | None = None
 
     @property
     def decoder(self):
@@ -360,10 +363,10 @@ class ProgressiveGrowingCallback(keras.callbacks.Callback):
                 "progressive=False. Set progressive=True at construction."
             )
 
-        # Stage 0 starts fully active — begin with its stabilization phase
         self._phase = "stabilize"
         self._phase_step = 0
         self._total_steps = 0
+        self._base_dec_expelbo_temp = self.model.dec_expelbo_temp
 
         if self.verbose:
             shape = dec.current_output_size()
@@ -393,6 +396,8 @@ class ProgressiveGrowingCallback(keras.callbacks.Callback):
                 enc.grow()
 
                 if dec.is_fully_grown:
+                    # Restore full expelbo temperature
+                    self.model.dec_expelbo_temp = self._base_dec_expelbo_temp
                     if self.verbose:
                         print(
                             f"\n[ProGrow] Step {self._total_steps}: "
@@ -400,9 +405,12 @@ class ProgressiveGrowingCallback(keras.callbacks.Callback):
                         )
                     return
 
-                # Enter fade-in phase for the new stage
+                # Enter fade-in: dampen expelbo to prevent amplified destabilization
                 self._phase = "fade_in"
                 self._phase_step = 0
+                self.model.dec_expelbo_temp = (
+                    self._base_dec_expelbo_temp * self.fade_in_expelbo_factor
+                )
 
                 if self.verbose:
                     shape = dec.current_output_size()
@@ -410,31 +418,42 @@ class ProgressiveGrowingCallback(keras.callbacks.Callback):
                         f"\n[ProGrow] Step {self._total_steps}: "
                         f"Growing to stage {dec.current_stage} — "
                         f"fade-in over {self.fade_in_steps} steps — "
-                        f"output {shape}"
+                        f"output {shape} — "
+                        f"dec_expelbo_temp dampened to {self.model.dec_expelbo_temp:.3f}"
                     )
 
         elif self._phase == "fade_in":
-            # Linearly ramp alpha from 0 → 1
             dec.alpha = self._phase_step / self.fade_in_steps
             enc.alpha = self._phase_step / self.fade_in_steps
 
+            # Linearly ramp expelbo temperature back up during fade-in
+            progress = self._phase_step / self.fade_in_steps
+            self.model.dec_expelbo_temp = self._base_dec_expelbo_temp * (
+                self.fade_in_expelbo_factor
+                + (1.0 - self.fade_in_expelbo_factor) * progress
+            )
+
             if self._phase_step >= self.fade_in_steps:
-                # Fade-in complete — lock alpha and enter stabilization
                 dec.alpha = 1.0
                 enc.alpha = 1.0
                 self._phase = "stabilize"
                 self._phase_step = 0
 
+                # Restore full expelbo temperature
+                self.model.dec_expelbo_temp = self._base_dec_expelbo_temp
+
                 if self.verbose:
                     print(
                         f"\n[ProGrow] Step {self._total_steps}: "
                         f"Stage {dec.current_stage} fade-in complete — "
-                        f"stabilizing for {self.stabilize_steps} steps"
+                        f"stabilizing for {self.stabilize_steps} steps — "
+                        f"dec_expelbo_temp restored to {self.model.dec_expelbo_temp:.3f}"
                     )
 
     def get_config(self):
         return dict(
             fade_in_steps=self.fade_in_steps,
             stabilize_steps=self.stabilize_steps,
+            fade_in_expelbo_factor=self.fade_in_expelbo_factor,
             verbose=self.verbose,
         )

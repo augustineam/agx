@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import keras
 
-from keras import layers
+from keras import layers, ops
 from typing import Sequence, List
 
 
@@ -76,8 +76,15 @@ class MobileNetV3SmallDecoder(BaseDecoder):
 
         if self.progressive and training:
             curr = self.current_stage
+
+            # Freeze not yet grown stages
             for stage in self.stages[curr + 1 :]:
                 stage.trainable = False
+
+            # During fade-in: freeze earlier stages to prevent destabilization
+            if self._alpha < 1.0:
+                for stage in self.stages[:curr]:
+                    stage.trainable = False
 
     def build(self, input_shape):
         x_shape, c_shape = input_shape
@@ -130,7 +137,7 @@ class MobileNetV3SmallDecoder(BaseDecoder):
             Sequential(
                 # 56->112
                 ResidualBlock(24, False, activation="hard_swish"),
-                Upsample2x("bilinear"),
+                Upsample2x("nearest"),
                 layers.SpatialDropout2D(0.05),
                 ResidualBlock(16, False, activation="hard_swish"),
                 ResidualBlock(16, False, activation="hard_swish"),
@@ -138,7 +145,7 @@ class MobileNetV3SmallDecoder(BaseDecoder):
             ),
             Sequential(
                 # 112->224
-                Upsample2x("bilinear"),
+                Upsample2x("nearest"),
                 ResidualBlock(16, True, activation="hard_swish"),
                 ResidualBlock(16, True, activation="hard_swish"),
                 layers.Conv2D(16, 3, padding="same", use_bias=False),
@@ -227,13 +234,13 @@ class MobileNetV3SmallDecoder(BaseDecoder):
             return self.to_rgb[cur](x, training=training)
 
         # Fade-in: blend old (upsampled prev to_rgb) with new (current stage to_rgb)
-        old_rgb = self.to_rgb[cur - 1](x, training=training)
+        old_rgb = self.to_rgb[cur - 1](ops.stop_gradient(x), training=False)
         old_rgb = self._fade_upsample(old_rgb)
 
         x = self.stages[cur](x, training=training)
         new_rgb = self.to_rgb[cur](x, training=training)
 
-        return (1.0 - alpha) * old_rgb + alpha * new_rgb
+        return (1.0 - alpha) * ops.stop_gradient(old_rgb) + alpha * new_rgb
 
     def current_output_size(self) -> tuple:
         """Current progressive output resolution as (H, W)."""

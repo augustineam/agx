@@ -423,7 +423,6 @@ class ReversedAutoencoderBase(Model):
 
         metric_updates = dict(
             loss_enc=loss,
-            loss_rec=-logpx_z_real,
             kld_real=kld_real,
             kld_rec=kld_rec,
             kld_fake=kld_fake,
@@ -501,6 +500,7 @@ class ReversedAutoencoderBase(Model):
 
         return loss, dict(
             loss_dec=loss,
+            loss_rec=-logpx_z_real,
             loss_embed=embed_loss,
             expelbo_rec_dec=expelbo_rec_dec,
             expelbo_fake_dec=expelbo_fake_dec,

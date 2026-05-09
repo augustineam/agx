@@ -69,6 +69,7 @@ class MobileNetV3SmallEncoder(BaseEncoder):
             from_rgb.trainable = (idx == start_stage_index) and training
 
         if self.progressive and training:
+            # Freeze not yet grown stages
             for stage in self.stages[:start_stage_index]:
                 stage.trainable = False
 
@@ -242,7 +243,8 @@ class MobileNetV3SmallEncoder(BaseEncoder):
             # Old path: deeper from_rgb at lower resolution
             old_size = self._stage_resolutions[start_stage_index + 1]
             x_old = ops.image.resize(x, old_size)
-            x_old = self.from_rgb[start_stage_index + 1](x_old, training=training)
+            x_old = self.from_rgb[start_stage_index + 1](x_old, training=False)
+            x_old = ops.stop_gradient(x_old)
 
             # New path: current from_rgb, then run the new stage
             x_new = self.from_rgb[start_stage_index](x, training=training)
