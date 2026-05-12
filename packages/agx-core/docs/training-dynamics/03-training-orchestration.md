@@ -91,7 +91,9 @@ real → [E] → (μ, σ, embeds) → reparam → z → [D] → rec_real
 
 **Loss:**
 
-$$\mathcal{L}_{\text{collab}} = -\text{ELBO}_{\text{real}} = \text{MSE}(\text{real}, \text{rec}) + \beta \cdot \text{KLD}(\mu, \sigma)$$
+$$\mathcal{L}_{\text{collab}} = -\text{ELBO}_{\text{real}} = \mathcal{L}_{\text{rec}}(\text{real}, \text{rec}) + \beta \cdot \text{KLD}(\mu, \sigma)$$
+
+where $\mathcal{L}_{\text{rec}}$ is the blended reconstruction loss (MSE + SSIM, see [02-loss-foundations.md](./02-loss-foundations.md#reconstruction-loss)).
 
 **Gradient flow:**
 - **Encoder** receives: "map reals to low-KLD latent codes that preserve reconstructable information"
@@ -119,11 +121,13 @@ noise → [D₁] → fake → [E_frozen_differentiable] → (μ, σ) → reparam
 
 $$\mathcal{L}_{\text{fake}} = \exp(-\tau_d \cdot \text{ELBO}_{\text{fake}})$$
 
-where $\text{ELBO}_{\text{fake}} = -\text{MSE}(\text{sg}(\text{fake}), \text{rec\_fake}) - \beta \cdot \text{KLD}(\mu_{\text{fake}}, \sigma_{\text{fake}})$
+where $\text{ELBO}_{\text{fake}} = -\mathcal{L}_{\text{rec}}(\text{sg}(\text{fake}), \text{rec\_fake}) - \beta \cdot \text{KLD}(\mu_{\text{fake}}, \sigma_{\text{fake}})$
+
+where $\mathcal{L}_{\text{rec}}$ is the blended reconstruction loss (MSE + SSIM).
 
 **Critical design choices:**
 
-1. **`fake` is stop-gradiented as MSE target** — prevents the degenerate solution where D₁ minimizes MSE by changing the target (which it controls) rather than improving the prediction.
+1. **`fake` is stop-gradiented as reconstruction target** — prevents the degenerate solution where D₁ minimizes the loss by changing the target (which it controls) rather than improving the prediction.
 
 2. **`z_fake` is NOT stop-gradiented** — D₂'s MSE gradient flows back through `z → reparam → (μ,σ) → E → fake → D₁`. This gives D₁ the cycle consistency signal: "produce images that survive round-tripping through encode→decode."
 
@@ -131,10 +135,10 @@ where $\text{ELBO}_{\text{fake}} = -\text{MSE}(\text{sg}(\text{fake}), \text{rec
 
 **Gradient signals to D₁ (first decoder call):**
 - Via KLD path through E: "generate images the encoder considers normal (low KLD)"
-- Via MSE→D₂→z→E path: "generate images that survive encode→decode round-trip (cycle consistency)"
+- Via reconstruction loss→D₂→z→E path: "generate images that survive encode→decode round-trip (cycle consistency)"
 
 **Gradient signals to D₂ (second decoder call):**
-- Direct MSE: "reconstruct `fake` faithfully from `z_fake`"
+- Direct reconstruction loss (MSE + SSIM): "reconstruct `fake` faithfully from `z_fake`"
 
 **Output retained as constant:** `fake` (detached) — reused in step 4.
 
@@ -154,11 +158,13 @@ z_real(const) → [D₁] → rec_real → [E_frozen_differentiable] → (μ, σ,
 
 $$\mathcal{L}_{\text{rec}} = \exp(-\tau_d \cdot \text{ELBO}_{\text{rec}}) + \lambda_{\text{embed}} \cdot \mathcal{L}_{\text{embed}}(\text{sg}(\text{embeds\_real}),\ \text{embeds\_rec})$$
 
-where $\text{ELBO}_{\text{rec}} = -\text{MSE}(\text{sg}(\text{rec\_real}), \text{rec\_rec}) - \beta \cdot \text{KLD}(\mu_{\text{rec}}, \sigma_{\text{rec}})$
+where $\text{ELBO}_{\text{rec}} = -\mathcal{L}_{\text{rec}}(\text{sg}(\text{rec\_real}), \text{rec\_rec}) - \beta \cdot \text{KLD}(\mu_{\text{rec}}, \sigma_{\text{rec}})$
+
+where $\mathcal{L}_{\text{rec}}$ is the blended reconstruction loss (MSE + SSIM).
 
 **Critical design choices:**
 
-1. **`rec_real` is stop-gradiented as MSE target** — same rationale as step 2.
+1. **`rec_real` is stop-gradiented as reconstruction target** — same rationale as step 2.
 
 2. **`z_rec` is NOT stop-gradiented** — D₁ gets cycle consistency signal through D₂→z_rec→E→rec_real→D₁.
 
@@ -167,10 +173,10 @@ where $\text{ELBO}_{\text{rec}} = -\text{MSE}(\text{sg}(\text{rec\_real}), \text
 **Gradient signals to D₁:**
 - Via embed_loss through E: "produce reconstructions perceptually matching the original"
 - Via KLD path through E: "produce reconstructions that encode normally"
-- Via MSE→D₂→z_rec→E path: "produce reconstructions that survive re-encoding"
+- Via reconstruction loss→D₂→z_rec→E path: "produce reconstructions that survive re-encoding"
 
 **Gradient signals to D₂:**
-- Direct MSE: "reconstruct `rec_real` faithfully from `z_rec`"
+- Direct reconstruction loss (MSE + SSIM): "reconstruct `rec_real` faithfully from `z_rec`"
 
 **Output retained as constant:** `rec_real` (detached) — reused in step 4.
 
@@ -199,7 +205,7 @@ $$\mathcal{L}_{\text{critic}} = \exp(-\tau_e \cdot \text{KLD}_{\text{fake}}) + \
 
 This focuses the encoder on hard cases — decoder outputs that already look normal — rather than wasting capacity on obvious fakes.
 
-**Why both `fake` and `rec_real`:** Averaging both paths prevents the encoder from learning an asymmetric shortcut (e.g., strong on fakes but weak on reconstructions). The equilibrium callback monitors `diff_kld = 0.5*(KLD_fake + KLD_rec) - KLD_real` to detect dominance on _either_ path.
+**Why both `fake` and `rec_real`:** Both paths prevent the encoder from learning an asymmetric shortcut (e.g., strong on fakes but weak on reconstructions). The equilibrium diagnostic `diff_kld` weights `KLD_rec` more heavily than `KLD_fake` (see [06-training-dynamics.md](./06-training-dynamics.md#equilibrium-diagnostic)) since the rec path shares data lineage with `KLD_real` and remains the more semantically meaningful signal throughout training.
 
 ---
 
@@ -226,7 +232,7 @@ For a MobileNetV3 encoder + MobileNetV3-style decoder at 224×224, batch=16:
 
 ## Interaction with Equilibrium Callback
 
-The callback monitors `diff_kld` and can independently disable steps:
+The callback monitors `diff_kld` and can independently disable steps. `diff_kld` uses a weighted average that emphasizes the reconstruction path (see [06-training-dynamics.md](./06-training-dynamics.md#equilibrium-diagnostic)):
 
 | Callback state | Step 1 | Steps 2/3 | Step 4 |
 |---|---|---|---|

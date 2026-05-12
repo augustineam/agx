@@ -6,7 +6,7 @@ import keras
 import torch
 
 from keras import ops
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from agx_core.models.reversed_autoencoder import ReversedAutoencoderBase
 from agx_core.models.reversed_autoencoder.base import BaseEncoder, BaseDecoder
@@ -38,8 +38,11 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
         beta_kld: float = 0.25,
         enc_expkld_temp: float = 1.0,
         dec_expelbo_temp: float = 1.0,
+        diff_kld_rec_weight: float = 0.7,
         spatial_temperature: float = 1.0,
         lambda_embed: float = 1.0,
+        alpha_ssim: Optional[float] = None,
+        ssim_kwargs: Optional[Dict[str, Any]] = None,
         name: str = "reversed_autoencoder",
         **kwargs,
     ):
@@ -50,8 +53,11 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
             beta_kld=beta_kld,
             enc_expkld_temp=enc_expkld_temp,
             dec_expelbo_temp=dec_expelbo_temp,
+            diff_kld_rec_weight=diff_kld_rec_weight,
             spatial_temperature=spatial_temperature,
             lambda_embed=lambda_embed,
+            alpha_ssim=alpha_ssim,
+            ssim_kwargs=ssim_kwargs,
             name=name,
             **kwargs,
         )
@@ -132,7 +138,9 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
 
         metrics = metrics_1 | metrics_2 | metrics_3 | metrics_4
         diff_kld = (
-            0.5 * (metrics["kld_fake"] + metrics["kld_rec"]) - metrics["kld_real"]
+            self.diff_kld_rec_weight * metrics["kld_rec"]
+            + (1 - self.diff_kld_rec_weight) * metrics["kld_fake"]
+            - metrics["kld_real"]
         )
 
         metrics.update(dict(diff_kld=diff_kld))

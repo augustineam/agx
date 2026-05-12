@@ -18,30 +18,34 @@ class Sequential(layers.Layer):
 
     def __init__(self, *layers: layers.Layer, name="sequential", **kwargs):
         super().__init__(name=name, **kwargs)
-        self._layers = list(layers)
+        # NOTE: Cannot use `self._layers` — Keras's saving machinery skips
+        # any attribute present on a bare Layer() instance, and `_layers` is
+        # one of them.  Using a non-colliding name ensures _walk_saveable
+        # finds and recurses into our sub-layers during save/load.
+        self._sub_layers = list(layers)
 
     def build(self, input_shape):
         shape = input_shape
-        for layer in self._layers:
+        for layer in self._sub_layers:
             layer.build(shape)
             shape = layer.compute_output_shape(shape)
         super().build(input_shape)
 
     def call(self, x, training=False):
-        for layer in self._layers:
+        for layer in self._sub_layers:
             x = layer(x, training=training)
         return x
 
     def compute_output_shape(self, input_shape):
         shape = input_shape
-        for layer in self._layers:
+        for layer in self._sub_layers:
             shape = layer.compute_output_shape(shape)
         return shape
 
     def get_config(self):
         base_config = super().get_config()
         layer_configs = [
-            keras.saving.serialize_keras_object(layer) for layer in self._layers
+            keras.saving.serialize_keras_object(layer) for layer in self._sub_layers
         ]
         return {**base_config, "layer_list": layer_configs}
 
@@ -51,7 +55,7 @@ class Sequential(layers.Layer):
             keras.saving.deserialize_keras_object(cfg)
             for cfg in config.pop("layer_list")
         ]
-        return cls(layer_list=layer_list, **config)
+        return cls(*layer_list, **config)
 
 
 @keras.saving.register_keras_serializable(package="agx_core.layers")

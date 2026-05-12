@@ -26,11 +26,11 @@ Each component operates on the **latest** version of its counterpart. This is an
 
 ## Spatial Curriculum Interaction
 
-The spatial curriculum (`spatial_temperature`) affects all MSE-based terms across all steps:
+The spatial curriculum (`spatial_temperature`) affects the MSE component of reconstruction loss across all steps:
 
 **Step 1 (collaborative):** Focuses E+D on reconstructing structural regions → better latent codes for edges/transitions → sharper anomaly maps at inference.
 
-**Steps 2/3 (adversarial):** Amplifies structural errors in decoder outputs → more negative ELBO → exp(-τ_d · ELBO) GROWS → decoder gets MORE gradient on structural failures. Creates positive feedback: spatial curriculum identifies where the decoder is failing structurally, and the exp curriculum amplifies that signal further.
+**Steps 2/3 (adversarial):** Amplifies structural errors in decoder outputs → more negative ELBO → exp(-τ_d · ELBO) GROWS → decoder gets MORE gradient on structural failures. Creates positive feedback: spatial curriculum identifies where the decoder is failing structurally, and the exp curriculum amplifies that signal further. The SSIM component independently provides structural gradient even without spatial weighting, but the two are complementary — SSIM captures local structure, spatial curriculum amplifies hard regions.
 
 **Step 4 (critic):** Spatial curriculum affects the ELBO used to compute KLD in steps 2/3 (which produces the `fake` and `rec_real` that step 4 encodes). Indirectly, better-structured decoder outputs from spatial focus make step 4's discrimination task harder over time → the encoder must develop finer discrimination.
 
@@ -46,10 +46,14 @@ The spatial curriculum (`spatial_temperature`) affects all MSE-based terms acros
 
 The `diff_kld` metric provides the primary adversarial balance diagnostic:
 
-$$\Delta_{\text{KLD}} = \frac{1}{2}(\text{KLD}_{\text{fake}} + \text{KLD}_{\text{rec}}) - \text{KLD}_{\text{real}}$$
+$$\Delta_{\text{KLD}} = \alpha \cdot \text{KLD}_{\text{rec}} + (1 - \alpha) \cdot \text{KLD}_{\text{fake}} - \text{KLD}_{\text{real}}$$
+
+where $\alpha$ = `diff_kld_rec_weight` (default: 0.7).
 
 - `KLD_real` comes from step 1 (how the encoder encodes real data)
 - `KLD_fake` and `KLD_rec` come from step 4 (how the encoder encodes decoder outputs)
+
+The weighting favors `KLD_rec` because it shares the same data lineage as `KLD_real` (both derive from the same real image) and directly reflects the deployment-relevant signal: can the encoder distinguish a round-tripped image from the original? As training progresses, `KLD_fake` naturally diverges upward (noise-originated fakes are always somewhat "weird"), making it increasingly noisy as a balance diagnostic. The 0.3 weight on `KLD_fake` retains early-training safety (detecting catastrophic encoder collapse on easy fakes) without letting late-training divergence mask issues on the rec path.
 
 | diff_kld | State | Action |
 |---|---|---|

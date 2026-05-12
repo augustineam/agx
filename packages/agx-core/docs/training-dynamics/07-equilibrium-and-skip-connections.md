@@ -12,9 +12,11 @@ By removing skip connections, all information must pass through the latent bottl
 
 The difference between KL divergences on decoder outputs and real samples provides a diagnostic of the adversarial balance:
 
-$$\Delta_{\text{KLD}} = \frac{1}{2}\left(D_{\text{KL}}^{\text{fake}} + D_{\text{KL}}^{\text{rec}}\right) - D_{\text{KL}}^{\text{real}}$$
+$$\Delta_{\text{KLD}} = \alpha \cdot D_{\text{KL}}^{\text{rec}} + (1 - \alpha) \cdot D_{\text{KL}}^{\text{fake}} - D_{\text{KL}}^{\text{real}}$$
 
-Both decoder output paths (fake and rec) are averaged to prevent the encoder from learning an asymmetric shortcut — e.g., becoming dominant on the rec path (easily discriminating re-reconstructions that accumulate two passes of decoder artifacts) while appearing balanced on the fake path. Averaging ensures the equilibrium callback detects dominance on _either_ path.
+where $\alpha$ = `diff_kld_rec_weight` (default: 0.7).
+
+The weighting emphasizes the reconstruction path because `kld_rec` and `kld_real` share the same data lineage (both derive from the same real image), making their difference a semantically clean measure of round-trip information loss. The `kld_fake` term retains a minority weight (0.3) for early-training safety — detecting catastrophic encoder collapse on easy fakes — without dominating the diagnostic as fakes naturally diverge in late training.
 
 | $\Delta_{\text{KLD}}$ | State                       | Interpretation                                                                                                     |
 | --------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------ |

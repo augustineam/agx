@@ -103,7 +103,7 @@ from agx_core.models.reversed_autoencoder import (
     MobileNetV3SmallEncoder,
     MobileNetV3SmallDecoder,
 )
-from agx_core.models.reversed_autoencoder.model import pixel_mse
+from agx_core.models.reversed_autoencoder.model import mse_weighted
 from agx_torch.models.reversed_autoencoder.model import ReversedAutoencoder
 
 spatial_temperature = 8.0
@@ -151,7 +151,7 @@ def plot_on_step_end(step: int, logs: Optional[Dict[str, Any]] = None):
     with torch.no_grad():
         reconstructed = ra([samples, labels])
         samples_resized = ra.resize_progressive_output(samples)
-        error = pixel_mse(samples_resized, reconstructed, spatial_temperature)
+        error = mse_weighted(samples_resized, reconstructed, spatial_temperature)
 
     samples_resized = samples_resized.cpu().numpy()
     reconstructed = reconstructed.cpu().numpy()

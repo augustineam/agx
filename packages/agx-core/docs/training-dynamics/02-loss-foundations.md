@@ -8,15 +8,21 @@ $$\log p_\theta(x) \geq \underbrace{\mathbb{E}_{q_\phi(z|x)}[\log p_\theta(x|z)]
 
 The ELBO decomposes into two competing objectives:
 
-- **Reconstruction term** $\mathbb{E}_{q_\phi(z|x)}[\log p_\theta(x|z)]$: Measures how well the decoder can reconstruct the input from the latent code. Maximizing this pushes the model toward faithful reconstructions. In practice, this is computed as the negative mean pixel MSE:
+- **Reconstruction term** $\mathbb{E}_{q_\phi(z|x)}[\log p_\theta(x|z)]$: Measures how well the decoder can reconstruct the input from the latent code. Maximizing this pushes the model toward faithful reconstructions. In practice, this is computed as the negative spatial mean of a blended pixel + structural loss:
 
-$$\log p_\theta(x|z) \approx -\text{mean}_{h,w}\left[\text{MSE}(x, \hat{x})\right]$$
+$$\log p_\theta(x|z) \approx -\text{mean}_{h,w}\left[\mathcal{L}_{\text{rec}}(x, \hat{x})\right]$$
+
+where the reconstruction loss blends MSE and SSIM (see [Reconstruction Loss](#reconstruction-loss) below).
 
 - **KL Divergence** $D_{\text{KL}}(q_\phi(z|x) \| p(z))$: Closed-form KLD from $\mathcal{N}(\mu, \text{diag}(\exp(\text{logvar})))$ to the standard normal prior $p(z) = \mathcal{N}(0, I)$:
 
 $$D_{\text{KL}} = \frac{1}{2C} \sum_{c=1}^{C} \left( \mu_c^2 + \exp(\text{logvar}_c) - \text{logvar}_c - 1 \right)$$
 
-Reduced via **mean** over both channels and spatial dimensions to produce a scalar per sample. This replaces the previous Monte Carlo estimate (`log q(z|x) - log p(z)`) which has non-zero variance — the closed form is exact, lower variance, and cheaper.
+The per-position KLD is **divided by the latent size** (number of channels $C$) — equivalent to `mean` over the channel dimension. This produces a per-spatial-position divergence in nats-per-dimension, making KLD values comparable across architectures with different channel counts. The spatial mean then reduces to a scalar per sample.
+
+A hard cap of `10.0` is applied per spatial position to prevent KLD explosion in early training or on pathological inputs.
+
+This replaces the previous Monte Carlo estimate (`log q(z|x) - log p(z)`) which has non-zero variance — the closed form is exact, lower variance, and cheaper.
 
 ### Reduction Strategy: Mean over Everything
 
@@ -32,7 +38,7 @@ The previous approach used an adaptive scaling factor $\alpha = 32 / \sqrt{H_{\t
 
 With mean reductions and the `beta_kld` weighting:
 
-$$\text{ELBO} = \underbrace{-\text{mean}_{h,w}[\text{MSE}(x, \hat{x})]}_{\text{logpx\_z} \in [-2, 0]} - \beta_{\text{kld}} \cdot \underbrace{\text{mean}_{h,w}[\text{KLD}]}_{\in [0, \sim1]}$$
+$$\text{ELBO} = \underbrace{-\text{mean}_{h,w}[\mathcal{L}_{\text{rec}}(x, \hat{x})]}_{\text{logpx\_z} \in [-2, 0]} - \beta_{\text{kld}} \cdot \underbrace{\text{mean}_{h,w}[\text{KLD}]}_{\in [0, \sim1]}$$
 
 Where `beta_kld` controls the reconstruction-regularization tradeoff:
 
@@ -43,9 +49,18 @@ Where `beta_kld` controls the reconstruction-regularization tradeoff:
 
 Feature consistency loss between two sets of intermediate encoder representations, combining MSE and cosine similarity:
 
-$$\mathcal{L}_{\text{embed}} = \frac{1}{L} \sum_{l=1}^{L} \text{mean}_{h,w} \left[ \frac{1}{2} \| f_l - f_l' \|^2_C + \left(1 - \frac{f_l \cdot f_l'}{\|f_l\|_C \|f_l'\|_C}\right) \right]$$
+$$\mathcal{L}_{\text{embed}} = \frac{1}{L} \sum_{l=1}^{L} \text{mean}_{h,w} \left[ \frac{1}{2} \| f_l - f_l' \|^2_C + (1 - \cos\theta_{l}) \right]$$
 
-Where $f_l$ and $f_l'$ are the encoder's intermediate features at layer $l$ for the original input and its reconstruction respectively. The MSE component captures magnitude differences while cosine similarity captures directional alignment in feature space. Both are computed along the channel axis $C$.
+Where $f_l$ and $f_l'$ are the encoder's intermediate features at layer $l$ for the original input and its reconstruction respectively, and $\cos\theta_l$ is the cosine similarity along the channel axis $C$ (values in $[-1, +1]$).
+
+**Implementation note:** `keras.losses.cosine_similarity` returns the **negative** cosine similarity ($-\cos\theta$). The code uses `1 + keras.losses.cosine_similarity(...)` which equals $1 - \cos\theta$.
+
+The `(1 - cos_sim)` term:
+- When features are perfectly aligned: $\cos\theta = +1 \Rightarrow 1 - 1 = 0$ (zero penalty — features match)
+- When features are orthogonal: $\cos\theta = 0 \Rightarrow 1 - 0 = 1$ (moderate penalty)
+- When features are anti-aligned: $\cos\theta = -1 \Rightarrow 1 + 1 = 2$ (maximum penalty)
+
+This formulation penalizes feature **dissimilarity** — the loss drives the reconstruction's features **toward** the original's. The MSE component captures magnitude differences while the cosine term captures directional misalignment in feature space. Together they provide a perceptual consistency signal: the decoder must produce reconstructions whose encoder features match the original at multiple depths.
 
 #### Depth-Weighted Embedding Loss (Optional)
 
@@ -57,7 +72,25 @@ For 5 layers: weights $\approx [0.06, 0.12, 0.25, 0.50, 1.00]$. This prevents th
 
 A middle-ground variant uses **cosine-only for shallow layers** (directional alignment is achievable even when magnitude matching is not) and full MSE + cosine for deep layers.
 
-### Pixel MSE with Spatial Curriculum
+### Reconstruction Loss
+
+The reconstruction loss blends pixel-level MSE with structural similarity (SSIM), controlled by `alpha_ssim`:
+
+$$\mathcal{L}_{\text{rec}}(x, \hat{x}) = (1 - \alpha_{\text{ssim}}) \cdot \text{MSE}_{\text{spatial}}(x, \hat{x}) + \alpha_{\text{ssim}} \cdot \mathcal{L}_{\text{SSIM}}(x, \hat{x})$$
+
+At $\alpha_{\text{ssim}} = 0$: pure MSE (original behavior). At $\alpha_{\text{ssim}} = 0.3$ (current default): blended.
+
+**Why SSIM matters for X-rays:** MSE treats all pixel errors equally — a uniform brightness shift and a structural edge dissolution produce similar MSE values. SSIM captures luminance, contrast, and structure independently, providing gradient signal specifically for structural fidelity. On information-sparse single-channel X-rays, structural features (edges, transitions, fine details) are the anomaly-relevant signal.
+
+#### SSIM Loss
+
+The SSIM loss computes `1 - SSIM` per spatial position using a Gaussian-weighted local window:
+
+$$\text{SSIM}(x, y) = \frac{(2\mu_x \mu_y + c_1)(2\sigma_{xy} + c_2)}{(\mu_x^2 + \mu_y^2 + c_1)(\sigma_x^2 + \sigma_y^2 + c_2)}$$
+
+where $\mu$, $\sigma$ are computed via depthwise convolution with a Gaussian kernel (size=11, σ=1.5), and $c_1$, $c_2$ are stability constants. The loss returns `1 - mean_C(SSIM)` — a spatial map of shape $(B, H, W)$ matching the MSE output.
+
+#### Pixel MSE with Spatial Curriculum
 
 Per-pixel reconstruction error reduced along the channel dimension:
 

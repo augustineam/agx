@@ -7,8 +7,10 @@
 | `beta_kld`            | 0.25    | 0.01–2.0   | KLD weight in all ELBO terms. <1 = reconstruction focus; ≥1 = latent structure |
 | `enc_expkld_temp`     | 1.0     | 0.5–3.0    | Encoder critic curriculum (step 4). Higher = ignore easy discriminations more |
 | `dec_expelbo_temp`    | 1.0     | 0.5–2.0    | Decoder adversarial curriculum (steps 2/3). Higher = more focus on failure modes |
-| `spatial_temperature` | 1.0     | 0.0–20.0   | Spatial hard-pixel mining. Higher = more focus on structural regions |
+| `spatial_temperature` | 1.0     | 0.0–20.0   | Spatial hard-pixel mining in MSE component. Higher = more focus on structural regions |
 | `lambda_embed`        | 1.0     | 0.1–5.0    | Embedding loss weight (step 3). Higher = more perceptual fidelity    |
+| `alpha_ssim`          | 0.3     | 0.0–0.5    | SSIM blend weight in reconstruction loss. 0 = pure MSE              |
+| `diff_kld_rec_weight` | 0.7     | 0.5–1.0    | Weight of kld_rec in diff_kld diagnostic. Higher = less influence from kld_fake |
 
 ## Callback Hyperparameters
 
@@ -24,9 +26,10 @@
 
 `spatial_temperature` and the exp-curriculum temperatures interact:
 
-- **Spatial curriculum** amplifies structural errors → ELBO values shift more negative
+- **Spatial curriculum** amplifies structural errors in the MSE component → ELBO values shift more negative
+- **SSIM** provides independent structural gradient that doesn't interact with spatial curriculum (SSIM has its own Gaussian windowing)
 - **Decoder exp(-τ_d · ELBO)** amplifies these (more negative ELBO → larger exp → more gradient on structural failures)
-- **Encoder exp(-τ_e · KLD)** is independent (KLD comes from (μ,σ), not from pixel MSE)
+- **Encoder exp(-τ_e · KLD)** is independent (KLD comes from (μ,σ), not from pixel errors)
 
 ### Tuning Guide
 

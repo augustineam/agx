@@ -9,7 +9,7 @@ The encoder is trained as a **discriminator** that identifies decoder outputs vi
 $$\mathcal{L}_{\text{critic}} = \exp(-\tau_e \cdot \text{KLD}_{\text{fake}}) + \exp(-\tau_e \cdot \text{KLD}_{\text{rec}})$$
 
 where:
-- $\text{KLD}_{\text{fake}} = \text{mean}_{h,w}[D_{\text{KL}}(q_\phi(z|\text{fake}) \| p(z))]$
+- $\text{KLD}_{\text{fake}} = \text{mean}_{h,w}[D_{\text{KL}}(q_\phi(z|\text{fake}) \| p(z))]$ — per-position KLD divided by latent size (channels), then averaged over spatial dimensions
 - $\text{KLD}_{\text{rec}} = \text{mean}_{h,w}[D_{\text{KL}}(q_\phi(z|\text{rec\_real}) \| p(z))]$
 
 The encoder **minimizes** this loss, which means **maximizing** KLD on decoder outputs.
