@@ -4,6 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
     "agx-core",
+    "pytorch-memlab>=0.3.0",
     "torch>=2.11.0",
     "torchvision>=0.26.0",
     "ultralytics>=8.4.37",

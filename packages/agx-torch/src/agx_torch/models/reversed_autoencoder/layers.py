@@ -8,7 +8,9 @@ from keras import ops
 from typing import Sequence
 
 
-@keras.saving.register_keras_serializable(package="agx_torch.models.reversed_autoencoder")
+@keras.saving.register_keras_serializable(
+    package="agx_torch.models.reversed_autoencoder"
+)
 class Reparameterization(keras.layers.Layer):
     """Samples from latent space using the reparameterization trick: z = μ + σ * ε.
 
@@ -29,7 +31,8 @@ class Reparameterization(keras.layers.Layer):
 
     def call(self, inputs):
         z_mean, z_log_var = inputs
-        eps = torch.randn_like(z_mean)
+        eps = torch.rand_like(z_mean)
+        # eps = torch.randn_like(z_mean)
         return eps * ops.exp(z_log_var * 0.5) + z_mean
 
     def compute_output_shape(self, input_shape: Sequence[Sequence[int]]):

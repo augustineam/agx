@@ -97,6 +97,7 @@ version = "0.1.0"
 source = { editable = "packages/agx-torch" }
 dependencies = [
     { name = "agx-core" },
+    { name = "pytorch-memlab" },
     { name = "torch" },
     { name = "torchvision" },
     { name = "ultralytics" },
@@ -105,6 +106,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "agx-core", editable = "packages/agx-core" },
+    { name = "pytorch-memlab", specifier = ">=0.3.0" },
     { name = "torch", specifier = ">=2.11.0" },
     { name = "torchvision", specifier = ">=0.26.0" },
     { name = "ultralytics", specifier = ">=8.4.37" },
@@ -337,6 +339,15 @@ sdist = { url = "https://files.pythonhosted.org/packages/76/7b/1755ed2c6bfabd1d9
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fe/c4/cf76242a5da1410917107ff14551764aa405a5fd10cd10cf9a5ca8fa77f4/cachetools-7.0.6-py3-none-any.whl", hash = "sha256:4e94956cfdd3086f12042cdd29318f5ced3893014f7d0d059bf3ead3f85b7f8b", size = 13976, upload-time = "2026-04-20T19:02:21.187Z" },
 ]
+
+[[package]]
+name = "calmsize"
+version = "0.1.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "setuptools" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/da/69/382ee4e1553f15321dd76109325f6a186a79354c53e8ac97cf79a2ebddbe/calmsize-0.1.3.tar.gz", hash = "sha256:e1f1233228ae6b7fafc8c23e52129c7ca58fee6bcf7875ae152eee5123ba122d", size = 3719, upload-time = "2019-05-28T01:01:42.977Z" }
 
 [[package]]
 name = "certifi"
@@ -3054,6 +3065,18 @@ sdist = { url = "https://files.pythonhosted.org/packages/82/ed/0301aeeac3e5353ef
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0b/d7/1959b9648791274998a9c3526f6d0ec8fd2233e4d4acce81bbae76b44b2a/python_dotenv-1.2.2-py3-none-any.whl", hash = "sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a", size = 22101, upload-time = "2026-03-01T16:00:25.09Z" },
 ]
+
+[[package]]
+name = "pytorch-memlab"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "calmsize" },
+    { name = "pandas" },
+    { name = "setuptools" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7f/8e/528f7ebccdd855aa0769c118548f77535fa33286ca6a0a833b92435c74fd/pytorch-memlab-0.3.0.tar.gz", hash = "sha256:4c80a9cf2ba4246e23352c408147fe8b1cec3a96bc69d81a63d67eb3fab16ab4", size = 22596, upload-time = "2023-07-29T13:27:13.376Z" }
 
 [[package]]
 name = "pytz"

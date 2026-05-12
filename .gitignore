@@ -28,3 +28,4 @@ output/
 *.onnx
 *.onnx.data
 *.keras
+*.pickle
