@@ -3,7 +3,9 @@ from __future__ import annotations
 import keras
 
 from keras import layers
+
 from agx_core.helpers import _channel_axis
+from agx_core.layers import Sequential
 
 
 def _depth(v: int, divisor: int = 8, min_value: int | None = None) -> int:
@@ -112,38 +114,46 @@ class InvertedResidualBlock(layers.Layer):
 
         # Expand: in_ch → mid_ch
         self.expand_conv = (
-            layers.Conv2D(mid_ch, 1, padding="same", use_bias=False)
+            Sequential(
+                layers.Conv2D(mid_ch, 1, padding="same", use_bias=False),
+                layers.BatchNormalization(**_bn),
+                layers.Activation(self._activation),
+                name="expand_conv",
+            )
             if self._expand
-            else None
+            else layers.Identity()
         )
-        self.expand_norm = layers.BatchNormalization(**_bn) if self._expand else None
-        self.expand_act = layers.Activation(self._activation) if self._expand else None
-
-        # Explicit padding for stride-2 (keeps spatial dims predictable)
-        if self.strides == 2:
-            pad = (self.kernel_size - 1) // 2
-            self.dw_pad = layers.ZeroPadding2D(padding=pad)
-        else:
-            self.dw_pad = None
 
         # Depthwise: mid_ch → mid_ch
-        self.dw_conv = layers.DepthwiseConv2D(
-            self.kernel_size,
-            strides=self.strides,
-            padding="same" if self.strides == 1 else "valid",
-            use_bias=False,
+        self.dw_conv = Sequential(
+            # Explicit padding for stride-2 (keeps spatial dims predictable)
+            (
+                layers.ZeroPadding2D(padding=(self.kernel_size - 1) // 2)
+                if self.strides == 2
+                else layers.Identity()
+            ),
+            layers.DepthwiseConv2D(
+                self.kernel_size,
+                strides=self.strides,
+                padding="same" if self.strides == 1 else "valid",
+                use_bias=False,
+            ),
+            layers.BatchNormalization(**_bn),
+            layers.Activation(self._activation),
+            name="dw_conv",
         )
-        self.dw_norm = layers.BatchNormalization(**_bn)
-        self.dw_act = layers.Activation(self._activation)
 
         # Squeeze-and-Excite
-        self.se = SqueezeExcite(self.se_ratio) if self.se_ratio > 0 else None
+        self.se = (
+            SqueezeExcite(self.se_ratio) if self.se_ratio > 0 else layers.Identity()
+        )
 
         # Project: mid_ch → filters (no activation — linear projection)
-        self.project_conv = layers.Conv2D(
-            self.filters, 1, padding="same", use_bias=False
+        self.project_conv = Sequential(
+            layers.Conv2D(self.filters, 1, padding="same", use_bias=False),
+            layers.BatchNormalization(**_bn),
+            name="project_conv",
         )
-        self.project_norm = layers.BatchNormalization(**_bn)
 
         # Residual shortcut
         self.use_shortcut = self.strides == 1 and in_ch == self.filters
@@ -151,27 +161,18 @@ class InvertedResidualBlock(layers.Layer):
             self.add = layers.Add()
 
         x_shape = input_shape
-        if self._expand:
-            # --- Build the layers ---
-            self.expand_conv.build(input_shape)
-            x_shape = self.expand_conv.compute_output_shape(input_shape)
-            self.expand_norm.build(x_shape)
 
-        if self.dw_pad is not None:
-            self.dw_pad.build(x_shape)
-            x_shape = self.dw_pad.compute_output_shape(x_shape)
+        self.expand_conv.build(input_shape)
+        x_shape = self.expand_conv.compute_output_shape(input_shape)
 
         self.dw_conv.build(x_shape)
         x_shape = self.dw_conv.compute_output_shape(x_shape)
-        self.dw_norm.build(x_shape)
 
-        if self.se is not None:
-            self.se.build(x_shape)
-            x_shape = self.se.compute_output_shape(x_shape)
+        self.se.build(x_shape)
+        x_shape = self.se.compute_output_shape(x_shape)
 
         self.project_conv.build(x_shape)
         x_shape = self.project_conv.compute_output_shape(x_shape)
-        self.project_norm.build(x_shape)
 
         super().build(input_shape)
 
@@ -198,34 +199,22 @@ class InvertedResidualBlock(layers.Layer):
         return tuple(shape)
 
     def call(self, x, training=None):
-        shortcut = x
 
-        # Expand
-        if self._expand:
-            out = self.expand_conv(x)
-            out = self.expand_norm(out, training=training)
-            out = self.expand_act(out)
-        else:
-            out = x
+        # Expand or Identity (no-op)
+        out = self.expand_conv(x, training=training)
 
-        # Depthwise
-        if self.dw_pad is not None:
-            out = self.dw_pad(out)
-        out = self.dw_conv(out)
-        out = self.dw_norm(out, training=training)
-        out = self.dw_act(out)
+        # Depthwise Convolution
+        out = self.dw_conv(out, training=training)
 
-        # Squeeze-and-Excite
-        if self.se is not None:
-            out = self.se(out, training=training)
+        # Squeeze-and-Excite or Identity (no-op)
+        out = self.se(out, training=training)
 
         # Project (linear — no activation)
-        out = self.project_conv(out)
-        out = self.project_norm(out, training=training)
+        out = self.project_conv(out, training=training)
 
         # Shortcut connection
         if self.use_shortcut:
-            out = self.add([shortcut, out])
+            out = self.add([x, out])
 
         return out
 

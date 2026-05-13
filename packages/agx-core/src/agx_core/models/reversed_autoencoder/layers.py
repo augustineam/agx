@@ -208,6 +208,18 @@ class ResidualBlock(layers.Layer):
         mid_ch = self.filters // 2 if self.bottleneck else self.filters
         kernel_size = 1 if self.bottleneck else 3
 
+        self.expand_conv = (
+            Sequential(
+                layers.Conv2D(self.filters, 1, padding="same", use_bias=False),
+                layers.GroupNormalization(
+                    max(1, self.filters // 4), axis=ch_axis, epsilon=1e-3
+                ),
+                name="expand_shortcut",
+            )
+            if in_ch != self.filters
+            else layers.Identity()
+        )
+
         self.conv1 = Sequential(
             layers.Conv2D(mid_ch, kernel_size, padding="same", use_bias=False),
             layers.GroupNormalization(max(1, mid_ch // 4), axis=ch_axis, epsilon=1e-3),
@@ -231,29 +243,14 @@ class ResidualBlock(layers.Layer):
                 name="conv3",
             )
             if self.bottleneck
-            else None
-        )
-
-        self.expand_conv = (
-            Sequential(
-                layers.Conv2D(self.filters, 1, padding="same", use_bias=False),
-                layers.GroupNormalization(
-                    max(1, self.filters // 4), axis=ch_axis, epsilon=1e-3
-                ),
-                name="expand_shortcut",
-            )
-            if in_ch != self.filters
-            else None
+            else layers.Identity()
         )
 
         self.add = layers.Add()
         self.activation = layers.Activation(self._activation)
 
-        if self.expand_conv:
-            self.expand_conv.build(input_shape)
-            y_shape = self.expand_conv.compute_output_shape(input_shape)
-        else:
-            y_shape = input_shape
+        self.expand_conv.build(input_shape)
+        y_shape = self.expand_conv.compute_output_shape(input_shape)
 
         self.conv1.build(input_shape)
         x_shape = self.conv1.compute_output_shape(input_shape)
@@ -261,9 +258,8 @@ class ResidualBlock(layers.Layer):
         self.conv2.build(x_shape)
         x_shape = self.conv2.compute_output_shape(x_shape)
 
-        if self.conv3:
-            self.conv3.build(x_shape)
-            x_shape = self.conv3.compute_output_shape(x_shape)
+        self.conv3.build(x_shape)
+        x_shape = self.conv3.compute_output_shape(x_shape)
 
         self.add.build([x_shape, y_shape])
 
@@ -272,22 +268,23 @@ class ResidualBlock(layers.Layer):
     def compute_output_shape(self, input_shape: Sequence[int]) -> Sequence[int]:
         x_shape = self.conv1.compute_output_shape(input_shape)
         x_shape = self.conv2.compute_output_shape(x_shape)
-        if self.conv3:
-            x_shape = self.conv3.compute_output_shape(x_shape)
+        x_shape = self.conv3.compute_output_shape(x_shape)
         return x_shape
 
     def call(
         self, x: keras.KerasTensor, training: Optional[bool] = None
     ) -> keras.KerasTensor:
 
-        shortcut = self.expand_conv(x, training=training) if self.expand_conv else x
+        # Either convolution or identity (no-op)
+        shortcut = self.expand_conv(x, training=training)
 
-        x = self.conv1(x, training=training)
-        x = self.conv2(x, training=training)
-        x = self.conv3(x, training=training) if self.conv3 else x
+        out = self.conv1(x, training=training)
+        out = self.conv2(out, training=training)
+        out = self.conv3(out, training=training)
 
-        x = self.add([x, shortcut])
-        return self.activation(x)
+        out = self.add([out, shortcut])
+
+        return self.activation(out)
 
     def get_config(self) -> Dict[Any, Any]:
         config = super().get_config()
@@ -325,7 +322,7 @@ class Reparameterization(layers.Layer):
     def call(self, inputs):
         z_mean, z_log_var = inputs
         eps = keras.random.normal(shape=ops.shape(z_mean))
-        return eps * ops.exp(z_log_var * 0.5) + z_mean
+        return ops.stop_gradient(eps) * ops.exp(z_log_var * 0.5) + z_mean
 
     def compute_output_shape(self, input_shape: Sequence[Sequence[int]]):
         return input_shape[0]

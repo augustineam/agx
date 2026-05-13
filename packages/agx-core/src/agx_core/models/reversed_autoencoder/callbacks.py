@@ -49,6 +49,7 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
         self,
         upper_threshold: float = 2.0,
         lower_threshold: float = -0.5,
+        diff_kld_rec_weight: float = 0.7,
         ema_momentum: float = 0.99,
         min_pause_steps: int = 50,
         verbose: bool = True,
@@ -56,6 +57,7 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
         super().__init__()
         self.upper_threshold = upper_threshold
         self.lower_threshold = lower_threshold
+        self.diff_kld_rec_weight = diff_kld_rec_weight
         self.ema_momentum = ema_momentum
         self.min_pause_steps = min_pause_steps
         self.verbose = verbose
@@ -73,12 +75,24 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
         self.model.train_decoder_enabled = True
 
     def on_train_batch_end(self, batch, logs=None):
-        if logs is None:
+        logs = logs or {}
+
+        keys = ["kld_real", "kld_rec", "kld_fake"]
+        exists = all(key in logs for key in keys)
+
+        if not exists:
             return
 
-        diff_kld = logs.get("diff_kld")
-        if diff_kld is None:
-            return
+        kld_real = logs.get("kld_real")
+        kld_rec = logs.get("kld_rec")
+        kld_fake = logs.get("kld_fake")
+
+        diff_kld = (
+            self.diff_kld_rec_weight * kld_rec
+            + (1 - self.diff_kld_rec_weight) * kld_fake
+            - kld_real
+        )
+        logs["diff_kld"] = diff_kld
 
         # Convert from tensor if needed
         diff_kld = float(diff_kld)

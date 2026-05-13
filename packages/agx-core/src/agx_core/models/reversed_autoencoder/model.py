@@ -13,9 +13,8 @@ from agx_core.helpers import _channel_axis
 def ssim_loss(
     y_true: keras.KerasTensor,
     y_pred: keras.KerasTensor,
+    kernel: keras.KerasTensor,
     max_val: float = 1.0,
-    filter_size: int = 11,
-    filter_sigma: float = 1.5,
     k1: float = 0.01,
     k2: float = 0.03,
 ) -> keras.KerasTensor:
@@ -40,21 +39,7 @@ def ssim_loss(
     c1 = (k1 * max_val) ** 2
     c2 = (k2 * max_val) ** 2
 
-    kernel = _gaussian_kernel(filter_size, filter_sigma)  # (kH, kW)
-
-    # (kH, kW, 1, 1) — depthwise kernel applied per-channel via groups
-    if keras.config.image_data_format() == "channels_last":
-        kernel = ops.expand_dims(kernel, axis=[-2, -1])
-    else:
-        kernel = ops.expand_dims(kernel, axis=[0, 1])
-
-    num_channels = ops.shape(y_true)[-1]
-
-    # Tile to (kH, kW, C, 1) for a depthwise convolution across all channels
-    kernel = ops.tile(kernel, [1, 1, num_channels, 1])
-
     def _apply_filter(x: keras.KerasTensor) -> keras.KerasTensor:
-        # ops.depthwise_conv: input (B, H, W, C), kernel (kH, kW, C, 1)
         return ops.depthwise_conv(
             x, kernel, strides=(1, 1), padding="same", dilation_rate=(1, 1)
         )
@@ -73,20 +58,8 @@ def ssim_loss(
     numerator = (2.0 * mu_xy + c1) * (2.0 * sigma_xy + c2)
     denominator = (mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2)
 
-    ssim_map = numerator / denominator  # (B, H', W', C)
-
+    ssim_map = numerator / denominator
     return 1.0 - ops.mean(ssim_map, axis=_channel_axis())
-
-
-def _gaussian_kernel(size: int, sigma: float) -> keras.KerasTensor:
-    """Builds a normalized 2-D Gaussian kernel using `ops`."""
-    # Coordinate grid centred at zero: shape (size,)
-    coords = ops.arange(size, dtype="float32") - (size - 1) / 2.0
-
-    # Outer product → (size, size) distance matrix
-    g = ops.exp(-(coords[:, None] ** 2 + coords[None, :] ** 2) / (2.0 * sigma**2))
-
-    return g / ops.sum(g)
 
 
 def kl_divergence(mean, logvar, cap=10.0):
@@ -162,27 +135,6 @@ def mse_weighted(y_true, y_pred, spatial_temperature: float = 0.0):
     return weights * error
 
 
-def reconstruction_loss(
-    y_true, y_pred, spatial_temperature: float = 0.0, alpha_ssim: float = 0.0, **kwargs
-):
-    """Combined pixel + structural reconstruction loss.
-
-    Returns spatial map (B, H, W) suitable for mean-reduction to logpx_z.
-
-    Args:
-        alpha_ssim: Blend weight. 0 = pure MSE (original behavior).
-                    Recommended for X-rays: 0.15–0.35
-    """
-    mse = mse_weighted(y_true, y_pred, spatial_temperature)  # (B, H, W)
-
-    if alpha_ssim <= 0.0:
-        return mse
-
-    ssim = ssim_loss(y_true, y_pred, **kwargs)  # (B, H, W)
-
-    return (1.0 - alpha_ssim) * mse + alpha_ssim * ssim
-
-
 @keras.saving.register_keras_serializable(
     package="agx_core.models.reversed_autoencoder"
 )
@@ -207,10 +159,9 @@ class ReversedAutoencoderBase(Model):
         beta_kld: float = 0.25,
         enc_expkld_temp: float = 1.0,
         dec_expelbo_temp: float = 1.0,
-        diff_kld_rec_weight: float = 0.7,
         spatial_temperature: float = 1.0,
         lambda_embed: float = 1.0,
-        alpha_ssim: Optional[float] = None,
+        alpha_ssim: float = 0.3,
         ssim_kwargs: Optional[Dict[str, Any]] = None,
         freeze_backbone: bool = True,
         name: str = "reversed_autoencoder",
@@ -225,10 +176,9 @@ class ReversedAutoencoderBase(Model):
         self.beta_kld = beta_kld
         self.enc_expkld_temp = enc_expkld_temp
         self.dec_expelbo_temp = dec_expelbo_temp
-        self.diff_kld_rec_weight = diff_kld_rec_weight
         self.spatial_temperature = spatial_temperature
         self.lambda_embed = lambda_embed
-        self.alpha_ssim = alpha_ssim if alpha_ssim is not None else 0.3
+        self.alpha_ssim = alpha_ssim
         self.ssim_kwargs = (
             ssim_kwargs
             if ssim_kwargs is not None
@@ -254,7 +204,6 @@ class ReversedAutoencoderBase(Model):
         self.kld_real_tracker = metrics.Mean("kld_real")
         self.kld_rec_tracker = metrics.Mean("kld_rec")
         self.kld_fake_tracker = metrics.Mean("kld_fake")
-        self.diff_kld_tracker = metrics.Mean("diff_kld")
         self.elbo_real_tracker = metrics.Mean("elbo_real")
         self.elbo_rec_tracker = metrics.Mean("elbo_rec")
         self.elbo_fake_tracker = metrics.Mean("elbo_fake")
@@ -276,7 +225,6 @@ class ReversedAutoencoderBase(Model):
             self.kld_real_tracker,
             self.kld_rec_tracker,
             self.kld_fake_tracker,
-            self.diff_kld_tracker,
             self.elbo_real_tracker,
             self.elbo_rec_tracker,
             self.elbo_fake_tracker,
@@ -309,7 +257,8 @@ class ReversedAutoencoderBase(Model):
             )
         shape = list(self._latent_shape)
         shape[0] = batch_size
-        return keras.random.normal(tuple(shape))
+        noise = keras.random.normal(tuple(shape))
+        return ops.stop_gradient(noise)
 
     def build(self, input_shape: Sequence[Sequence[int]]):
         x_shape, c_shape = input_shape
@@ -327,8 +276,36 @@ class ReversedAutoencoderBase(Model):
         x_shape = self.reparameterize.compute_output_shape(x_shape)
 
         self.decoder.build([x_shape, c_shape])
+        x_shape = self.decoder.compute_output_shape([x_shape, c_shape])
+
+        # Pre-build SSIM kernel (never changes, no gradients needed)
+        ch_axis = _channel_axis()
+        num_channels = x_shape[ch_axis]
+        self._ssim_kwargs = self.ssim_kwargs.copy()
+
+        self._ssim_kernel = self._build_ssim_kernel(
+            self._ssim_kwargs.pop("filter_size", 11),
+            self._ssim_kwargs.pop("filter_sigma", 1.5),
+            num_channels,
+        )
 
         super().build(input_shape)
+
+    def _build_ssim_kernel(self, filter_size, filter_sigma, num_channels):
+        """Build and cache the SSIM Gaussian kernel (no gradients)."""
+        coords = ops.arange(filter_size, dtype="float32") - (filter_size - 1) / 2.0
+        g = ops.exp(
+            -(coords[:, None] ** 2 + coords[None, :] ** 2) / (2.0 * filter_sigma**2)
+        )
+        kernel = g / ops.sum(g)  # (kH, kW)
+
+        if keras.config.image_data_format() == "channels_last":
+            kernel = ops.expand_dims(kernel, axis=[-2, -1])  # (kH, kW, 1, 1)
+        else:
+            kernel = ops.expand_dims(kernel, axis=[0, 1])  # (1, 1, kH, kW)
+
+        kernel = ops.tile(kernel, [1, 1, num_channels, 1])
+        return ops.stop_gradient(kernel)  # Ensure no grad tracking
 
     def get_build_config(self):
         """Persist the two input shapes so build_from_config can rebuild optimizers."""
@@ -356,6 +333,17 @@ class ReversedAutoencoderBase(Model):
             [self._img_shape, self._cond_shape]
         )
         self._latent_shape = x_shape[0]
+
+        ch_axis = _channel_axis()
+        num_channels = self._img_shape[ch_axis]
+        self._ssim_kwargs = self.ssim_kwargs.copy()
+
+        self._ssim_kernel = self._build_ssim_kernel(
+            self._ssim_kwargs.pop("filter_size", 11),
+            self._ssim_kwargs.pop("filter_sigma", 1.5),
+            num_channels,
+        )
+
         self.built = True
 
     def _build_optimizers_if_needed(self):
@@ -432,6 +420,30 @@ class ReversedAutoencoderBase(Model):
             "dec_optimizer": keras.optimizers.serialize(self.dec_optimizer),
         }
 
+    def reconstruction_loss(
+        self,
+        y_true: keras.KerasTensor,
+        y_pred: keras.KerasTensor,
+    ):
+        """Combined pixel + structural reconstruction loss.
+
+        Returns spatial map (B, H, W) suitable for mean-reduction to logpx_z.
+
+        Args:
+            alpha_ssim: Blend weight. 0 = pure MSE (original behavior).
+                        Recommended for X-rays: 0.15–0.35
+        """
+        mse = mse_weighted(y_true, y_pred, self.spatial_temperature)  # (B, H, W)
+
+        if self.alpha_ssim <= 0.0:
+            return mse
+
+        ssim = ssim_loss(
+            y_true, y_pred, self._ssim_kernel, **self._ssim_kwargs
+        )  # (B, H, W)
+
+        return (1.0 - self.alpha_ssim) * mse + self.alpha_ssim * ssim
+
     def call(
         self,
         inputs: Sequence[keras.KerasTensor],
@@ -481,13 +493,7 @@ class ReversedAutoencoderBase(Model):
         rec = self.decoder([z, cond], training=training)
 
         logpx_z = -ops.mean(
-            reconstruction_loss(
-                real,
-                rec,
-                spatial_temperature=self.spatial_temperature,
-                alpha_ssim=self.alpha_ssim,
-                **self.ssim_kwargs,
-            ),
+            self.reconstruction_loss(real, rec),
             axis=[1, 2],
         )
         kld = ops.mean(kl_divergence(mean, logvar), axis=[1, 2])
@@ -522,13 +528,7 @@ class ReversedAutoencoderBase(Model):
         rec = self.decoder([z, cond], training=training)
 
         logpx_z = -ops.mean(
-            reconstruction_loss(
-                ops.stop_gradient(fake),
-                rec,
-                spatial_temperature=self.spatial_temperature,
-                alpha_ssim=self.alpha_ssim,
-                **self.ssim_kwargs,
-            ),
+            self.reconstruction_loss(ops.stop_gradient(fake), rec),
             axis=[1, 2],
         )
         kld = ops.mean(kl_divergence(mean, logvar), axis=[1, 2])
@@ -562,13 +562,7 @@ class ReversedAutoencoderBase(Model):
         rec_rec = self.decoder([z_rec, cond], training=training)
 
         logpx_z = -ops.mean(
-            reconstruction_loss(
-                ops.stop_gradient(rec),
-                rec_rec,
-                spatial_temperature=self.spatial_temperature,
-                alpha_ssim=self.alpha_ssim,
-                **self.ssim_kwargs,
-            ),
+            self.reconstruction_loss(ops.stop_gradient(rec), rec_rec),
             axis=[1, 2],
         )
         kld = ops.mean(kl_divergence(mean, logvar), axis=[1, 2])
@@ -648,32 +642,21 @@ class ReversedAutoencoderBase(Model):
 
         (batch_real, batch_cond), _ = data
 
-        batch_size = ops.shape(batch_real)[0]
-        batch_noise = self.noise(batch_size)
         batch_real = self.resize_progressive_output(batch_real)
 
-        _, z_real, embeds_real, metrics_1 = self.train_collaborative(
+        loss, z_real, embeds_real, metrics = self.train_collaborative(
             batch_real, batch_cond, training=False
         )
-        _, fake, metrics_2 = self.train_decoder_fake_path(
-            batch_noise, batch_cond, training=False
-        )
-        _, rec, metrics_3 = self.train_decoder_rec_path(
-            z_real, embeds_real, batch_cond, training=False
-        )
-        _, metrics_4 = self.train_encoder_critic(fake, rec, batch_cond, training=False)
 
-        metrics = metrics_1 | metrics_2 | metrics_3 | metrics_4
-        diff_kld = (
-            self.diff_kld_rec_weight * metrics["kld_rec"]
-            + (1 - self.diff_kld_rec_weight) * metrics["kld_fake"]
-            - metrics["kld_real"]
-        )
-
-        metrics.update(dict(diff_kld=diff_kld))
         self.update_step_metrics(metrics)
 
-        return self.get_metrics_result()
+        return_metrics = {
+            name: result
+            for name, result in self.get_metrics_result().items()
+            if name in metrics
+        }
+        del loss, z_real, embeds_real, metrics
+        return return_metrics
 
     def get_config(self):
         config = super().get_config()
@@ -685,7 +668,6 @@ class ReversedAutoencoderBase(Model):
                 beta_kld=self.beta_kld,
                 enc_expkld_temp=self.enc_expkld_temp,
                 dec_expelbo_temp=self.dec_expelbo_temp,
-                diff_kld_rec_weight=self.diff_kld_rec_weight,
                 spatial_temperature=self.spatial_temperature,
                 lambda_embed=self.lambda_embed,
                 alpha_ssim=self.alpha_ssim,
