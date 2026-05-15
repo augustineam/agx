@@ -93,31 +93,29 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
 
         (batch_real, batch_cond), _ = data
 
-        batch_size = batch_real.shape[0]
-        batch_noise = self.noise(batch_size)
         batch_real = self.resize_progressive_output(batch_real)
 
         # 1. Train VAE Collaborative
         self.zero_grad()
 
-        loss_1, z_real, embeds_real, metrics_1 = self.train_collaborative(
+        loss_1, z_real, embeds_real = self.train_collaborative(
             batch_real, batch_cond, training=True
         )
         loss_1.backward()
 
         self._apply_encoder_gradients()
         self._apply_decoder_gradients()
-        self.update_step_metrics(metrics_1)
 
         z_real = _detach_clone(z_real)
         embeds_real = _detach_clone_list(embeds_real)
-        del loss_1, metrics_1
 
-        self.zero_grad()
+        del loss_1
+
         if self.train_decoder_enabled:
+            self.zero_grad()
             # 2. Train Decoder on fake path
-            loss_2, fake, metrics_2 = self.train_decoder_fake_path(
-                batch_noise, batch_cond, training=True
+            loss_2, fake = self.train_decoder_fake_path(
+                z_real, batch_cond, training=True
             )
             loss_2.backward()
 
@@ -125,7 +123,7 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
             del loss_2
 
             # 3. Train Decoder on reconstruction path
-            loss_3, rec, metrics_3 = self.train_decoder_rec_path(
+            loss_3, rec = self.train_decoder_rec_path(
                 z_real, embeds_real, batch_cond, training=True
             )
             loss_3.backward()
@@ -135,33 +133,29 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
             del loss_3
         else:
             with torch.no_grad():
-                _, fake, metrics_2 = self.train_decoder_fake_path(
-                    batch_noise, batch_cond, training=False
+                _, fake = self.train_decoder_fake_path(
+                    z_real, batch_cond, training=False
                 )
-                _, rec, metrics_3 = self.train_decoder_rec_path(
+                _, rec = self.train_decoder_rec_path(
                     z_real, embeds_real, batch_cond, training=False
                 )
 
-        self.update_step_metrics(metrics_2 | metrics_3)
-        del metrics_2, metrics_3, z_real, embeds_real
+        del z_real, embeds_real
 
-        self.zero_grad()
         if self.train_encoder_enabled:
+            self.zero_grad()
             # 4. Train Encoder as critic
-            loss_4, metrics_4 = self.train_encoder_critic(
-                fake, rec, batch_cond, training=True
-            )
+            loss_4 = self.train_encoder_critic(fake, rec, batch_cond, training=True)
             loss_4.backward()
             self._apply_encoder_gradients()
         else:
             with torch.no_grad():
-                loss_4, metrics_4 = self.train_encoder_critic(
+                loss_4 = self.train_encoder_critic(
                     fake, rec, batch_cond, training=False
                 )
 
         self.zero_grad()
-        self.update_step_metrics(metrics_4)
-        del loss_4, metrics_4, fake, rec
+        del loss_4, rec
 
         return self.get_metrics_result()
 
@@ -172,19 +166,10 @@ class ReversedAutoencoder(ReversedAutoencoderBase, torch.nn.Module):
 
             batch_real = self.resize_progressive_output(batch_real)
 
-            loss, z_real, embeds_real, metrics = self.train_collaborative(
-                batch_real, batch_cond, training=False
-            )
+            output = self.train_collaborative(batch_real, batch_cond, training=False)
+            del output
 
-        self.update_step_metrics(metrics)
-
-        return_metrics = {
-            name: result
-            for name, result in self.get_metrics_result().items()
-            if name in metrics
-        }
-        del loss, z_real, embeds_real, metrics
-        return return_metrics
+        return {m.name: m.result() for m in self.test_metrics}
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]):

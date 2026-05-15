@@ -173,4 +173,45 @@ class Upsample2x(keras.layers.Layer):
         return config
 
 
-__all__ = ["Sequential", "Split", "Upsample2x"]
+@keras.saving.register_keras_serializable(package="agx_core.layers")
+class SoftClamp(keras.layers.Layer):
+    """Smooth differentiable clamp using scaled tanh.
+
+    Maps unbounded input to (min_val, max_val) with smooth gradients
+    everywhere. Unlike hard clipping, gradients never vanish — they
+    approach zero asymptotically at the boundaries.
+
+        output = center + half_range * tanh((x - center) / half_range)
+
+    where center = (min_val + max_val) / 2, half_range = (max_val - min_val) / 2.
+
+    Near the center the function is approximately identity (slope ≈ 1).
+    Near the boundaries the slope decays smoothly toward 0.
+
+    Args:
+        min_val: Lower bound of the output range.
+        max_val: Upper bound of the output range.
+    """
+
+    def __init__(self, min_val: float = -10.0, max_val: float = 2.0, **kwargs):
+        super().__init__(**kwargs)
+        self.min_val = min_val
+        self.max_val = max_val
+        self._center = (min_val + max_val) / 2.0
+        self._half_range = (max_val - min_val) / 2.0
+
+    def call(self, x):
+        return self._center + self._half_range * ops.tanh(
+            (x - self._center) / self._half_range
+        )
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"min_val": self.min_val, "max_val": self.max_val})
+        return config
+
+
+__all__ = ["Sequential", "Split", "Upsample2x", "SoftClamp"]

@@ -229,21 +229,23 @@ class BackboneThawCallback(keras.callbacks.Callback):
             self._thawed = True
 
     def _thaw_backbone(self):
-        encoder = self.model.encoder
-        self.model.freeze_backbone = False
+        from .encoders.mobilenet_v3 import MobileNetV3SmallEncoder
 
-        if not hasattr(encoder, "backbone") or not hasattr(encoder, "train_backbone"):
+        encoder = self.model.encoder
+
+        if not isinstance(encoder, MobileNetV3SmallEncoder):
             if self.verbose:
-                print("\n[Thaw] No backbone attribute found on encoder. Skipping.")
+                print(
+                    f"\n[Thaw] Encoder is {type(encoder).__name__}, "
+                    "not a backbone encoder — skipping."
+                )
             return
 
-        # Unfreeze all backbone layers
-        encoder.train_backbone(True)
+        encoder.freeze_backbone = False
+        encoder.training_enabled(True)
 
         if self.verbose:
-            print(
-                f"\n[Thaw] Unfreezing backbone: LR factor: {self.backbone_lr_factor}x"
-            )
+            print(f"\n[Thaw] Backbone unfrozen (LR factor: {self.backbone_lr_factor}x)")
             print(
                 f"[Thaw] Triggered after {self._wait} epochs without "
                 f"improvement on {self.monitor} (best={self._best:.6f})"
@@ -327,55 +329,39 @@ class ProgressiveGrowingCallback(keras.callbacks.Callback):
         self._base_dec_expelbo_temp: float | None = None
 
     @property
-    def decoder(self):
-        """Resolve the decoder from the model.
-
-        Supports both direct Decoder instances and the
-        ReversedAutoencoderBase wrapper (model.decoder).
-        """
-        from .decoders.mobilenet_v3 import MobileNetV3SmallDecoder
+    def decoder(self) -> "MobileNetV3SmallProgressiveDecoder":
+        from .decoders.mobilenet_v3 import MobileNetV3SmallProgressiveDecoder
 
         model = self.model
-        if isinstance(model, MobileNetV3SmallDecoder):
+        if isinstance(model, MobileNetV3SmallProgressiveDecoder):
             return model
-        if hasattr(model, "decoder"):
-            dec = model.decoder
-            if isinstance(dec, MobileNetV3SmallDecoder):
-                return dec
+        if hasattr(model, "decoder") and isinstance(model.decoder, MobileNetV3SmallProgressiveDecoder):
+            return model.decoder
         raise TypeError(
-            f"ProgressiveGrowingCallback requires a Decoder instance, "
-            f"got {type(model).__name__} with decoder={type(getattr(model, 'decoder', None)).__name__}"
+            f"ProgressiveGrowingCallback requires a MobileNetV3SmallProgressiveDecoder, "
+            f"got {type(getattr(model, 'decoder', model)).__name__}"
         )
 
     @property
-    def encoder(self):
-        """Resolve the encoder from the model.
-
-        Supports both direct Decoder instances and the
-        ReversedAutoencoderBase wrapper (model.encoder).
-        """
-        from .encoders.mobilenet_v3 import MobileNetV3SmallEncoder
+    def encoder(self) -> "MobileNetV3SmallProgressiveEncoder":
+        from .encoders.mobilenet_v3 import MobileNetV3SmallProgressiveEncoder
 
         model = self.model
-        if isinstance(model, MobileNetV3SmallEncoder):
+        if isinstance(model, MobileNetV3SmallProgressiveEncoder):
             return model
-        if hasattr(model, "encoder"):
-            enc = model.encoder
-            if isinstance(enc, MobileNetV3SmallEncoder):
-                return enc
+        if hasattr(model, "encoder") and isinstance(model.encoder, MobileNetV3SmallProgressiveEncoder):
+            return model.encoder
         raise TypeError(
-            f"ProgressiveGrowingCallback requires a Encoder instance, "
-            f"got {type(model).__name__} with encoder={type(getattr(model, 'encoder', None)).__name__}"
+            f"ProgressiveGrowingCallback requires a MobileNetV3SmallProgressiveEncoder, "
+            f"got {type(getattr(model, 'encoder', model)).__name__}"
         )
 
     def on_train_begin(self, logs=None):
         dec = self.decoder
         enc = self.encoder
-        if not dec.progressive or not enc.progressive:
-            raise ValueError(
-                "ProgressiveGrowingCallback attached to a Encoder or Decoder with "
-                "progressive=False. Set progressive=True at construction."
-            )
+        # Accessing .decoder / .encoder already asserts the correct types;
+        # touch both here to surface misconfiguration early.
+        _ = dec, enc
 
         self._phase = "stabilize"
         self._phase_step = 0

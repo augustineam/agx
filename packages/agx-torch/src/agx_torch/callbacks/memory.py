@@ -96,7 +96,7 @@ class MemorySnapshotCallback(callbacks.Callback):
         snapshot_at_steps: Sequence[int] = (100, 500),
         capture_duration: int = 10,
         output_dir: str = "./mem_snapshots",
-        max_entries: int = 100_000,
+        max_entries: int = 1_000_000,
         print_summary: bool = True,
     ):
         super().__init__()

@@ -100,8 +100,8 @@ ds_valid = UnlabeledImageDataset(
 from keras.optimizers import Adam
 
 from agx_core.models.reversed_autoencoder import (
-    MobileNetV3SmallEncoder,
-    MobileNetV3SmallDecoder,
+    MobileNetV3SmallProgressiveEncoder,
+    MobileNetV3SmallProgressiveDecoder,
 )
 from agx_core.models.reversed_autoencoder.model import mse_weighted
 from agx_torch.models.reversed_autoencoder.model import ReversedAutoencoder
@@ -113,8 +113,8 @@ if ra_model.exists():
     ra: ReversedAutoencoder = keras.models.load_model(ra_model)
     ra.place_on_devices("cuda:0", "cuda:1")
 else:
-    enc = MobileNetV3SmallEncoder(latent_size=512, progressive=True)
-    dec = MobileNetV3SmallDecoder(target_shape=img_shape[1:], progressive=True)
+    enc = MobileNetV3SmallProgressiveEncoder(latent_size=512)
+    dec = MobileNetV3SmallProgressiveDecoder(target_shape=img_shape[1:])
     ra = ReversedAutoencoder(
         enc,
         dec,

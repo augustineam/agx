@@ -163,7 +163,6 @@ class ReversedAutoencoderBase(Model):
         lambda_embed: float = 1.0,
         alpha_ssim: float = 0.3,
         ssim_kwargs: Optional[Dict[str, Any]] = None,
-        freeze_backbone: bool = True,
         name: str = "reversed_autoencoder",
         **kwargs,
     ):
@@ -172,7 +171,6 @@ class ReversedAutoencoderBase(Model):
         self.encoder = encoder
         self.decoder = decoder
         self.reparameterize = reparameterize
-        self.freeze_backbone = freeze_backbone
         self.beta_kld = beta_kld
         self.enc_expkld_temp = enc_expkld_temp
         self.dec_expelbo_temp = dec_expelbo_temp
@@ -232,6 +230,19 @@ class ReversedAutoencoderBase(Model):
             self.expkld_fake_tracker,
             self.expelbo_rec_tracker,
             self.expelbo_fake_tracker,
+        ]
+
+    @property
+    def test_metrics(self):
+        """Return list of test tracked metrics.
+
+        Returns:
+            List of metric trackers for monitoring validation progress
+        """
+        return [
+            self.loss_rec_tracker,
+            self.kld_real_tracker,
+            self.elbo_real_tracker,
         ]
 
     @property
@@ -467,16 +478,12 @@ class ReversedAutoencoderBase(Model):
         return self.decoder([z, c], training=training)
 
     def resize_progressive_output(self, image: keras.KerasTensor):
-        is_progressive = (
-            hasattr(self.decoder, "progressive") and self.decoder.progressive
-        )
-        is_fully_grown = (
-            hasattr(self.decoder, "is_fully_grown") and self.decoder.is_fully_grown
-        )
+        from .decoders.mobilenet_v3 import MobileNetV3SmallProgressiveDecoder
 
-        if not is_progressive or is_fully_grown:
+        if not isinstance(self.decoder, MobileNetV3SmallProgressiveDecoder):
             return image
-
+        if self.decoder.is_fully_grown:
+            return image
         return ops.image.resize(image, self.decoder.current_output_size())
 
     def train_collaborative(
@@ -485,43 +492,42 @@ class ReversedAutoencoderBase(Model):
         cond: keras.KerasTensor,
         training: Optional[bool] = None,
     ):
-        self.encoder.training_enabled(True)
-        self.decoder.training_enabled(True)
+        self.encoder.training_enabled(training or True)
+        self.decoder.training_enabled(training or True)
 
         (mean, logvar), embeds = self.encoder([real, cond], training=training)
         z = self.reparameterize([mean, logvar])
         rec = self.decoder([z, cond], training=training)
 
-        logpx_z = -ops.mean(
+        loss_rec = ops.mean(
             self.reconstruction_loss(real, rec),
             axis=[1, 2],
         )
         kld = ops.mean(kl_divergence(mean, logvar), axis=[1, 2])
-        elbo_real = logpx_z - self.beta_kld * kld
+        elbo_real = -loss_rec - self.beta_kld * kld
 
         loss = -ops.mean(elbo_real)
 
-        z = ops.stop_gradient(z)
-        embeds = [ops.stop_gradient(e) for e in embeds]
+        self.loss_rec_tracker.update_state(ops.stop_gradient(loss_rec))
+        self.kld_real_tracker.update_state(ops.stop_gradient(kld))
+        self.elbo_real_tracker.update_state(ops.stop_gradient(elbo_real))
 
-        metrics_updates = dict(
-            loss_rec=ops.stop_gradient(-logpx_z),
-            elbo_real=ops.stop_gradient(elbo_real),
-            kld_real=ops.stop_gradient(kld),
-        )
-
-        return loss, z, embeds, metrics_updates
+        return loss, ops.stop_gradient(z), [ops.stop_gradient(e) for e in embeds]
 
     def train_decoder_fake_path(
         self,
-        noise: keras.KerasTensor,
+        z_real: keras.KerasTensor,
         cond: keras.KerasTensor,
         training: Optional[bool] = None,
     ):
         self.encoder.training_enabled(False)
-        self.decoder.training_enabled(True)
+        self.decoder.training_enabled(training or True)
 
-        fake = self.decoder([noise, cond], training=training)
+        z_perturbed = ops.stop_gradient(
+            z_real + keras.random.normal(ops.shape(z_real)) * 0.1
+        )
+
+        fake = self.decoder([z_perturbed, cond], training=training)
 
         (mean, logvar), _ = self.encoder([fake, cond], training=False)
         z = self.reparameterize([mean, logvar])
@@ -537,13 +543,10 @@ class ReversedAutoencoderBase(Model):
         expelbo = ops.exp(-self.dec_expelbo_temp * elbo)
         loss = ops.mean(expelbo)
 
-        fake = ops.stop_gradient(fake)
-        metrics_updates = dict(
-            elbo_fake=ops.stop_gradient(elbo),
-            expelbo_fake=ops.stop_gradient(expelbo),
-        )
+        self.elbo_fake_tracker.update_state(ops.stop_gradient(elbo))
+        self.expelbo_fake_tracker.update_state(ops.stop_gradient(expelbo))
 
-        return loss, fake, metrics_updates
+        return loss, ops.stop_gradient(fake)
 
     def train_decoder_rec_path(
         self,
@@ -553,7 +556,7 @@ class ReversedAutoencoderBase(Model):
         training: Optional[bool] = None,
     ):
         self.encoder.training_enabled(False)
-        self.decoder.training_enabled(True)
+        self.decoder.training_enabled(training or True)
 
         rec = self.decoder([z_real, cond], training=training)
 
@@ -573,14 +576,11 @@ class ReversedAutoencoderBase(Model):
 
         loss = ops.mean(expelbo + embed_loss)
 
-        rec = ops.stop_gradient(rec)
-        metrics_updates = dict(
-            elbo_rec=ops.stop_gradient(elbo),
-            expelbo_rec=ops.stop_gradient(expelbo),
-            loss_embed=ops.stop_gradient(embed_loss),
-        )
+        self.elbo_rec_tracker.update_state(ops.stop_gradient(elbo))
+        self.expelbo_rec_tracker.update_state(ops.stop_gradient(expelbo))
+        self.loss_embed_tracker.update_state(ops.stop_gradient(embed_loss))
 
-        return loss, rec, metrics_updates
+        return loss, ops.stop_gradient(rec)
 
     def train_encoder_critic(
         self,
@@ -589,7 +589,7 @@ class ReversedAutoencoderBase(Model):
         cond: keras.KerasTensor,
         training: Optional[bool] = None,
     ):
-        self.encoder.training_enabled(True)
+        self.encoder.training_enabled(training or True)
         self.decoder.training_enabled(False)
 
         (mean_fake, logvar_fake), _ = self.encoder([fake, cond], training=training)
@@ -603,19 +603,12 @@ class ReversedAutoencoderBase(Model):
 
         loss = ops.mean(expkld_fake + expkld_rec)
 
-        metrics_updates = dict(
-            kld_rec=ops.stop_gradient(kld_rec),
-            kld_fake=ops.stop_gradient(kld_fake),
-            expkld_fake=ops.stop_gradient(expkld_fake),
-            expkld_rec=ops.stop_gradient(expkld_rec),
-        )
+        self.kld_rec_tracker.update_state(ops.stop_gradient(kld_rec))
+        self.kld_fake_tracker.update_state(ops.stop_gradient(kld_fake))
+        self.expkld_fake_tracker.update_state(ops.stop_gradient(expkld_fake))
+        self.expkld_rec_tracker.update_state(ops.stop_gradient(expkld_rec))
 
-        return loss, metrics_updates
-
-    def update_step_metrics(self, metric_updates):
-        """Helper to cleanly update all tracked metrics from the returned dictionaries."""
-        for name, value in metric_updates.items():
-            getattr(self, f"{name}_tracker").update_state(value)
+        return loss
 
     def train_step(self, data):
         """Perform one training step with adversarial encoder-decoder training.
@@ -644,19 +637,10 @@ class ReversedAutoencoderBase(Model):
 
         batch_real = self.resize_progressive_output(batch_real)
 
-        loss, z_real, embeds_real, metrics = self.train_collaborative(
-            batch_real, batch_cond, training=False
-        )
+        output = self.train_collaborative(batch_real, batch_cond, training=False)
+        del output
 
-        self.update_step_metrics(metrics)
-
-        return_metrics = {
-            name: result
-            for name, result in self.get_metrics_result().items()
-            if name in metrics
-        }
-        del loss, z_real, embeds_real, metrics
-        return return_metrics
+        return {metric.name: metric.result() for metric in self.test_metrics}
 
     def get_config(self):
         config = super().get_config()
@@ -672,7 +656,6 @@ class ReversedAutoencoderBase(Model):
                 lambda_embed=self.lambda_embed,
                 alpha_ssim=self.alpha_ssim,
                 ssim_kwargs=self.ssim_kwargs,
-                freeze_backbone=self.freeze_backbone,
             )
         )
         return config
