@@ -177,7 +177,133 @@ class MemorySnapshotCallback(callbacks.Callback):
             print(torch.cuda.memory_summary(abbreviated=True))
 
 
+class MemoryLeakDiagnosticCallback(callbacks.Callback):
+    """Diagnose GPU memory leaks by comparing allocated memory across steps
+    and detecting unreachable CUDA tensors (ghost blocks).
+
+    Prints per-step:
+      - allocated / reserved delta from previous step
+      - number of live CUDA tensors found via gc
+      - total size of live CUDA tensors vs reported allocation (gap = ghosts)
+      - after gc.collect() + empty_cache: residual that won't go away
+
+    Usage:
+        MemoryLeakDiagnosticCallback(
+            start_step=5,        # skip warmup
+            every_n_steps=10,    # don't spam every step
+            full_gc_every=50,    # expensive full diagnostic less often
+        )
+    """
+
+    def __init__(
+        self,
+        start_step: int = 5,
+        every_n_steps: int = 10,
+        full_gc_every: int = 50,
+        verbose_tensors: bool = False,
+    ):
+        super().__init__()
+        self.start_step = start_step
+        self.every_n_steps = every_n_steps
+        self.full_gc_every = full_gc_every
+        self.verbose_tensors = verbose_tensors
+        self._step = 0
+        self._prev_alloc = 0
+        self._prev_reserved = 0
+
+    def on_train_batch_end(self, batch, logs=None):
+        self._step += 1
+
+        if self._step < self.start_step:
+            return
+
+        if self._step % self.every_n_steps != 0:
+            return
+
+        torch.cuda.synchronize()
+
+        alloc = torch.cuda.memory_allocated()
+        reserved = torch.cuda.memory_reserved()
+        delta_alloc = alloc - self._prev_alloc
+        delta_reserved = reserved - self._prev_reserved
+
+        # Count live CUDA tensors reachable from Python
+        live_tensor_bytes, live_tensor_count = self._count_live_cuda_tensors()
+
+        ghost_bytes = alloc - live_tensor_bytes
+
+        print(
+            f"\n[MemDiag] Step {self._step}: "
+            f"alloc={alloc / 1024**2:.1f}MB (Δ{delta_alloc / 1024**2:+.1f}MB)  "
+            f"reserved={reserved / 1024**2:.1f}MB (Δ{delta_reserved / 1024**2:+.1f}MB)  "
+            f"live_tensors={live_tensor_count} ({live_tensor_bytes / 1024**2:.1f}MB)  "
+            f"ghosts={ghost_bytes / 1024**2:.1f}MB"
+        )
+
+        # Full diagnostic: gc + empty_cache to find true leaks
+        if self._step % self.full_gc_every == 0:
+            self._full_diagnostic()
+
+        self._prev_alloc = alloc
+        self._prev_reserved = reserved
+
+    def _count_live_cuda_tensors(self):
+        """Walk all Python objects to find CUDA tensors and sum their storage."""
+        seen_data_ptrs = set()
+        total_bytes = 0
+        count = 0
+
+        for obj in gc.get_objects():
+            try:
+                if isinstance(obj, torch.Tensor) and obj.is_cuda:
+                    # Use data_ptr to avoid double-counting shared storage
+                    ptr = obj.data_ptr()
+                    if ptr not in seen_data_ptrs and ptr != 0:
+                        seen_data_ptrs.add(ptr)
+                        total_bytes += obj.element_size() * obj.nelement()
+                        count += 1
+
+                        if self.verbose_tensors and obj.nelement() > 1_000_000:
+                            print(
+                                f"    [large tensor] shape={tuple(obj.shape)} "
+                                f"dtype={obj.dtype} "
+                                f"size={obj.element_size() * obj.nelement() / 1024**2:.1f}MB "
+                                f"grad_fn={obj.grad_fn is not None} "
+                                f"requires_grad={obj.requires_grad}"
+                            )
+            except (ReferenceError, RuntimeError):
+                pass
+
+        return total_bytes, count
+
+    def _full_diagnostic(self):
+        """Run GC + empty_cache and report what remains."""
+        # Before GC
+        pre_gc_alloc = torch.cuda.memory_allocated()
+
+        gc.collect()
+        torch.cuda.synchronize()
+
+        post_gc_alloc = torch.cuda.memory_allocated()
+        gc_freed = pre_gc_alloc - post_gc_alloc
+
+        torch.cuda.empty_cache()
+        post_cache_reserved = torch.cuda.memory_reserved()
+
+        # Recount after GC
+        live_bytes, live_count = self._count_live_cuda_tensors()
+
+        print(
+            f"  [FULL GC] gc.collect() freed {gc_freed / 1024**2:.1f}MB  "
+            f"post_gc_alloc={post_gc_alloc / 1024**2:.1f}MB  "
+            f"post_empty_cache_reserved={post_cache_reserved / 1024**2:.1f}MB  "
+            f"live={live_count} tensors ({live_bytes / 1024**2:.1f}MB)  "
+            f"true_ghosts={(post_gc_alloc - live_bytes) / 1024**2:.1f}MB"
+        )
+
+
 __all__ = [
     "GarbageCollectionCallback",
     "MemorySnapshotCallback",
+    "MemoryLeakDiagnosticCallback",
 ]

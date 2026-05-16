@@ -1,138 +1,13 @@
 import keras
 
-
 from keras import metrics, Model, ops
 from typing import Sequence, Optional, Dict, Any
 
 from .base import BaseEncoder, BaseDecoder
 from .layers import Reparameterization
+from .losses import *
 
 from agx_core.helpers import _channel_axis
-
-
-def ssim_loss(
-    y_true: keras.KerasTensor,
-    y_pred: keras.KerasTensor,
-    kernel: keras.KerasTensor,
-    max_val: float = 1.0,
-    k1: float = 0.01,
-    k2: float = 0.03,
-) -> keras.KerasTensor:
-    """
-    Structural Similarity Index (SSIM) loss via `ops`.
-
-    Computes `1 - SSIM(y_true, y_pred)` so that minimizing the loss
-    maximizes structural similarity.
-
-    Args:
-        y_true: Ground-truth images, shape `(B, H, W, C)`.
-        y_pred: Predicted images, shape `(B, H, W, C)`.
-        max_val: The dynamic range of the images (1.0 for normalized, 255.0 for uint8).
-        filter_size: Side length of the Gaussian kernel.
-        filter_sigma: Standard deviation of the Gaussian kernel.
-        k1: Stability constant for the luminance term.
-        k2: Stability constant for the contrast/structure term.
-
-    Returns:
-        Scalar loss value: `1 - mean(SSIM)`.
-    """
-    c1 = (k1 * max_val) ** 2
-    c2 = (k2 * max_val) ** 2
-
-    def _apply_filter(x: keras.KerasTensor) -> keras.KerasTensor:
-        return ops.depthwise_conv(
-            x, kernel, strides=(1, 1), padding="same", dilation_rate=(1, 1)
-        )
-
-    mu_x = _apply_filter(y_true)
-    mu_y = _apply_filter(y_pred)
-
-    mu_x_sq = mu_x * mu_x
-    mu_y_sq = mu_y * mu_y
-    mu_xy = mu_x * mu_y
-
-    sigma_x_sq = _apply_filter(y_true * y_true) - mu_x_sq
-    sigma_y_sq = _apply_filter(y_pred * y_pred) - mu_y_sq
-    sigma_xy = _apply_filter(y_true * y_pred) - mu_xy
-
-    numerator = (2.0 * mu_xy + c1) * (2.0 * sigma_xy + c2)
-    denominator = (mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2)
-
-    ssim_map = numerator / denominator
-    return 1.0 - ops.mean(ssim_map, axis=_channel_axis())
-
-
-def kl_divergence(mean, logvar, cap=10.0):
-    """Closed-form KLD from N(mean, exp(logvar)) to N(0, I), per spatial position.
-
-    With a spatial latent (B, H, W, C), this returns a (B, H, W) map where
-    each position measures how "unusual" the encoding is at that location.
-
-    KLD = 0.5 * Σ_c (μ² + exp(logvar) - logvar - 1) / C
-
-    This replaces the Monte Carlo estimate (log q(z|x) - log p(z)) which
-    requires sampling z and has non-zero variance. The closed form is
-    exact, lower variance, and cheaper to compute.
-
-    Returns:
-        KLD map of shape (B, H, W) — mean over channels, spatial preserved.
-    """
-    kld = 0.5 * ops.mean(
-        ops.square(mean) + ops.exp(logvar) - logvar - 1.0,
-        axis=_channel_axis(),
-    )
-    return ops.minimum(kld, cap)
-
-
-def embedding_loss(
-    teacher_embedds: Sequence[keras.KerasTensor],
-    student_embedds: Sequence[keras.KerasTensor],
-):
-    """Feature consistency loss (MSE + Cosine Similarity) between two sets of embeddings."""
-    total_loss = 0
-    scale = 1.0 / len(teacher_embedds)
-    for teacher_feature, student_feature in zip(teacher_embedds, student_embedds):
-        mse = ops.mean(
-            ops.square(teacher_feature - student_feature), axis=_channel_axis()
-        )
-        # [B, H, W]
-        cosine_similarity = keras.losses.cosine_similarity(
-            teacher_feature, student_feature, axis=_channel_axis()
-        )
-        total_loss += ops.mean(0.5 * mse + (1 + cosine_similarity), axis=[1, 2])
-    return scale * total_loss
-
-
-def mse_weighted(y_true, y_pred, spatial_temperature: float = 0.0):
-    """Per-pixel MSE with optional spatial curriculum weighting.
-
-    When spatial_temperature > 0, hard-to-reconstruct regions receive
-    exponentially more gradient attention. Critical for information-sparse
-    images (single-channel X-rays) where uniform background dominates
-    the spatial mean.
-
-    Args:
-        y_true: Ground truth [B, H, W, C]
-        y_pred: Prediction [B, H, W, C]
-        spatial_temperature: Curriculum sharpness. 0 = uniform (original behavior).
-            Recommended range for X-rays: 2.0-10.0
-
-    Returns:
-        Error map [B, H, W]. When temperature > 0, the map is spatially
-        reweighted so that hard regions contribute more to the downstream mean.
-    """
-    error = ops.mean(ops.square(y_true - y_pred), axis=_channel_axis())  # [B, H, W]
-
-    if spatial_temperature <= 0.0:
-        return error
-
-    # Exponential weighting: hard pixels (high error) get more attention
-    # stop_gradient prevents second-order effects (don't optimize weights themselves)
-    weights = ops.exp(spatial_temperature * ops.stop_gradient(error))
-    # Normalize per-sample so overall loss magnitude is preserved
-    weights = weights / ops.mean(weights, axis=[1, 2], keepdims=True)
-
-    return weights * error
 
 
 @keras.saving.register_keras_serializable(
@@ -156,13 +31,14 @@ class ReversedAutoencoderBase(Model):
         encoder: BaseEncoder,
         decoder: BaseDecoder,
         reparameterize=Reparameterization(),
-        beta_kld: float = 0.25,
+        beta_kld: float = 1.0,
         enc_expkld_temp: float = 1.0,
         dec_expelbo_temp: float = 1.0,
-        spatial_temperature: float = 1.0,
         lambda_embed: float = 1.0,
+        spatial_temp: float = 1.0,
         alpha_ssim: float = 0.3,
         ssim_kwargs: Optional[Dict[str, Any]] = None,
+        z_fake_interp: Optional[Dict[str, Any]] = None,
         name: str = "reversed_autoencoder",
         **kwargs,
     ):
@@ -174,9 +50,18 @@ class ReversedAutoencoderBase(Model):
         self.beta_kld = beta_kld
         self.enc_expkld_temp = enc_expkld_temp
         self.dec_expelbo_temp = dec_expelbo_temp
-        self.spatial_temperature = spatial_temperature
+        self.spatial_temp = spatial_temp
         self.lambda_embed = lambda_embed
         self.alpha_ssim = alpha_ssim
+        self.z_fake_interp = (
+            z_fake_interp
+            if z_fake_interp is not None
+            else dict(
+                mode="manifold",  # | "manifold" | "slerp"
+                manifold_op="shuffle",  # | "shuffle"
+                perturbed_sigma=0.2,
+            )
+        )
         self.ssim_kwargs = (
             ssim_kwargs
             if ssim_kwargs is not None
@@ -260,16 +145,6 @@ class ReversedAutoencoderBase(Model):
     @enc_optimizer.setter
     def enc_optimizer(self, optimizer: keras.Optimizer):
         self.optimizer = optimizer
-
-    def noise(self, batch_size) -> keras.KerasTensor:
-        if self._latent_shape is None:
-            raise ValueError(
-                "Make sure to build the encoder or to set the correct latent space shape"
-            )
-        shape = list(self._latent_shape)
-        shape[0] = batch_size
-        noise = keras.random.normal(tuple(shape))
-        return ops.stop_gradient(noise)
 
     def build(self, input_shape: Sequence[Sequence[int]]):
         x_shape, c_shape = input_shape
@@ -444,7 +319,7 @@ class ReversedAutoencoderBase(Model):
             alpha_ssim: Blend weight. 0 = pure MSE (original behavior).
                         Recommended for X-rays: 0.15–0.35
         """
-        mse = mse_weighted(y_true, y_pred, self.spatial_temperature)  # (B, H, W)
+        mse = mse_weighted(y_true, y_pred, self.spatial_temp)  # (B, H, W)
 
         if self.alpha_ssim <= 0.0:
             return mse
@@ -508,11 +383,13 @@ class ReversedAutoencoderBase(Model):
 
         loss = -ops.mean(elbo_real)
 
-        self.loss_rec_tracker.update_state(ops.stop_gradient(loss_rec))
-        self.kld_real_tracker.update_state(ops.stop_gradient(kld))
-        self.elbo_real_tracker.update_state(ops.stop_gradient(elbo_real))
+        metrics = dict(
+            loss_rec=loss_rec,
+            kld_real=kld,
+            elbo_real=elbo_real,
+        )
 
-        return loss, ops.stop_gradient(z), [ops.stop_gradient(e) for e in embeds]
+        return loss, ops.stop_gradient(z), embeds, metrics
 
     def train_decoder_fake_path(
         self,
@@ -523,11 +400,9 @@ class ReversedAutoencoderBase(Model):
         self.encoder.training_enabled(False)
         self.decoder.training_enabled(training or True)
 
-        z_perturbed = ops.stop_gradient(
-            z_real + keras.random.normal(ops.shape(z_real)) * 0.1
-        )
+        z_fake = self.sample_z_fake(z_real)
 
-        fake = self.decoder([z_perturbed, cond], training=training)
+        fake = self.decoder([z_fake, cond], training=training)
 
         (mean, logvar), _ = self.encoder([fake, cond], training=False)
         z = self.reparameterize([mean, logvar])
@@ -543,10 +418,12 @@ class ReversedAutoencoderBase(Model):
         expelbo = ops.exp(-self.dec_expelbo_temp * elbo)
         loss = ops.mean(expelbo)
 
-        self.elbo_fake_tracker.update_state(ops.stop_gradient(elbo))
-        self.expelbo_fake_tracker.update_state(ops.stop_gradient(expelbo))
+        metrics = dict(
+            elbo_fake=elbo,
+            expelbo_fake=expelbo,
+        )
 
-        return loss, ops.stop_gradient(fake)
+        return loss, ops.stop_gradient(fake), metrics
 
     def train_decoder_rec_path(
         self,
@@ -576,11 +453,13 @@ class ReversedAutoencoderBase(Model):
 
         loss = ops.mean(expelbo + embed_loss)
 
-        self.elbo_rec_tracker.update_state(ops.stop_gradient(elbo))
-        self.expelbo_rec_tracker.update_state(ops.stop_gradient(expelbo))
-        self.loss_embed_tracker.update_state(ops.stop_gradient(embed_loss))
+        metrics = dict(
+            elbo_rec=elbo,
+            expelbo_rec=expelbo,
+            loss_embed=embed_loss,
+        )
 
-        return loss, ops.stop_gradient(rec)
+        return loss, ops.stop_gradient(rec), metrics
 
     def train_encoder_critic(
         self,
@@ -603,12 +482,19 @@ class ReversedAutoencoderBase(Model):
 
         loss = ops.mean(expkld_fake + expkld_rec)
 
-        self.kld_rec_tracker.update_state(ops.stop_gradient(kld_rec))
-        self.kld_fake_tracker.update_state(ops.stop_gradient(kld_fake))
-        self.expkld_fake_tracker.update_state(ops.stop_gradient(expkld_fake))
-        self.expkld_rec_tracker.update_state(ops.stop_gradient(expkld_rec))
+        metrics = dict(
+            kld_rec=kld_rec,
+            kld_fake=kld_fake,
+            expkld_fake=expkld_fake,
+            expkld_rec=expkld_rec,
+        )
 
-        return loss
+        return loss, metrics
+
+    def update_step_metrics(self, metric_updates):
+        """Helper to cleanly update all tracked metrics from the returned dictionaries."""
+        for name, value in metric_updates.items():
+            getattr(self, f"{name}_tracker").update_state(value)
 
     def train_step(self, data):
         """Perform one training step with adversarial encoder-decoder training.
@@ -637,10 +523,54 @@ class ReversedAutoencoderBase(Model):
 
         batch_real = self.resize_progressive_output(batch_real)
 
-        output = self.train_collaborative(batch_real, batch_cond, training=False)
-        del output
+        *_, metrics = self.train_collaborative(batch_real, batch_cond, training=False)
 
+        self.update_step_metrics(metrics)
         return {metric.name: metric.result() for metric in self.test_metrics}
+
+    def sample_z_fake(self, z: keras.KerasTensor):
+        mode = self.z_fake_interp.get("mode", "perturbed")
+
+        if mode == "manifold":
+            z_fake = self._sample_z_manifold(z)
+        elif mode == "perturbed":
+            z_fake = self._sample_z_perturbed(z)
+        elif mode == "slerp":
+            z_fake = self._sample_z_slerp(z)
+        else:
+            raise ValueError(f"Unknown interpolation mode: {mode}")
+
+        return z_fake
+
+    def _sample_manifold(self, z: keras.KerasTensor):
+        manifold_op = self.z_fake_interp.get("manifold_op", "roll")
+        if manifold_op == "roll":
+            z_b = ops.roll(z, shift=1, axis=0)
+        else:
+            z_b = keras.random.shuffle(z, axis=0)
+        return ops.stop_gradient(z_b)
+
+    def _sample_z_manifold(self, z: keras.KerasTensor):
+        z_b = self._sample_manifold(z)
+        batch_size = ops.shape(z)[0]
+        t = keras.random.uniform((batch_size, 1, 1, 1))
+        z_interp = (1 - t) * z + t * z_b
+        return ops.stop_gradient(z_interp)
+
+    def _sample_z_perturbed(self, z: keras.KerasTensor):
+        sigma = self.z_fake_interp.get("perturbed_sigma", 0.2)
+        z_perturbed = z + keras.random.normal(ops.shape(z)) * sigma
+        return ops.stop_gradient(z_perturbed)
+
+    def _sample_z_slerp(self, z: keras.KerasTensor):
+        z_b = self._sample_manifold(z)
+        batch_size = ops.shape(z)[0]
+        t = keras.random.uniform((batch_size, 1, 1, 1))
+        theta = ops.arccos(ops.sum(z * z_b, axis=_channel_axis(), keepdims=True))
+        z_interp = (ops.sin((1 - t) * theta) * z + ops.sin(t * theta) * z_b) / ops.sin(
+            theta
+        )
+        return ops.stop_gradient(z_interp)
 
     def get_config(self):
         config = super().get_config()
@@ -652,10 +582,11 @@ class ReversedAutoencoderBase(Model):
                 beta_kld=self.beta_kld,
                 enc_expkld_temp=self.enc_expkld_temp,
                 dec_expelbo_temp=self.dec_expelbo_temp,
-                spatial_temperature=self.spatial_temperature,
                 lambda_embed=self.lambda_embed,
+                spatial_temp=self.spatial_temp,
                 alpha_ssim=self.alpha_ssim,
                 ssim_kwargs=self.ssim_kwargs,
+                z_fake_interp=self.z_fake_interp,
             )
         )
         return config
