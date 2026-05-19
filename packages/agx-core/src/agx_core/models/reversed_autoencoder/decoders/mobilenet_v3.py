@@ -8,7 +8,7 @@ from typing import Sequence, List
 from agx_core.helpers import _channel_axis, _spatial_slice
 from agx_core.models.mobilenet_v3 import InvertedResidualBlock
 from agx_core.models.reversed_autoencoder.base import BaseDecoder
-from agx_core.models.reversed_autoencoder.layers import ResidualBlock
+from agx_core.models.mobilenet_v3.layers import ResidualBlock
 from agx_core.layers import Sequential, Upsample2x
 
 
@@ -117,7 +117,12 @@ class MobileNetV3SmallDecoder(_MobileNetV3SmallDecoderBase):
         name: str = "mbnetv3_decoder",
         **kwargs,
     ):
-        super().__init__(target_shape=target_shape, rgb_activation=rgb_activation, name=name, **kwargs)
+        super().__init__(
+            target_shape=target_shape,
+            rgb_activation=rgb_activation,
+            name=name,
+            **kwargs,
+        )
 
     def build(self, input_shape):
         x_shape, c_shape = input_shape
@@ -190,7 +195,12 @@ class MobileNetV3SmallProgressiveDecoder(_MobileNetV3SmallDecoderBase):
         name: str = "mbnetv3_progressive_decoder",
         **kwargs,
     ):
-        super().__init__(target_shape=target_shape, rgb_activation=rgb_activation, name=name, **kwargs)
+        super().__init__(
+            target_shape=target_shape,
+            rgb_activation=rgb_activation,
+            name=name,
+            **kwargs,
+        )
         self._initial_stage = initial_stage
         self._initial_alpha = initial_alpha
 
@@ -238,7 +248,7 @@ class MobileNetV3SmallProgressiveDecoder(_MobileNetV3SmallDecoderBase):
 
         if training:
             # Freeze stages not yet grown
-            for stage in self.stages[curr + 1:]:
+            for stage in self.stages[curr + 1 :]:
                 stage.trainable = False
             # During fade-in freeze earlier stages to prevent destabilization
             if self._alpha < 1.0:
@@ -270,7 +280,9 @@ class MobileNetV3SmallProgressiveDecoder(_MobileNetV3SmallDecoderBase):
 
         if self._initial_stage is not None:
             self._current_stage = self._initial_stage
-            self._alpha = self._initial_alpha if self._initial_alpha is not None else 1.0
+            self._alpha = (
+                self._initial_alpha if self._initial_alpha is not None else 1.0
+            )
         else:
             self._current_stage = 0
             self._alpha = 1.0
@@ -357,11 +369,7 @@ def MobileNetV3SmallDecoder_factory(progressive: bool = False, **kwargs):
     Returns ``MobileNetV3SmallProgressiveDecoder`` when ``progressive=True``,
     otherwise ``MobileNetV3SmallDecoder``.
     """
-    cls = (
-        MobileNetV3SmallProgressiveDecoder
-        if progressive
-        else MobileNetV3SmallDecoder
-    )
+    cls = MobileNetV3SmallProgressiveDecoder if progressive else MobileNetV3SmallDecoder
     return cls(**kwargs)
 
 

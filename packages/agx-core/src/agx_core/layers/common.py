@@ -101,21 +101,26 @@ class Split(keras.layers.Layer):
     def call(self, inputs):
         axis = self.axis if self.axis >= 0 else len(inputs.shape) + self.axis
 
+        # Use slicing instead of ops.split to avoid GuardOnDataDependentSymNode
+        # during torch.export. The channel dim is known at build time.
         if isinstance(self.num_or_size_splits, int):
-            # Use slicing instead of ops.split to avoid GuardOnDataDependentSymNode
-            # during torch.export. The channel dim is known at build time.
             total = inputs.shape[axis]
             if total is not None:
                 chunk = total // self.num_or_size_splits
-                slices = []
-                for i in range(self.num_or_size_splits):
-                    idx = [slice(None)] * len(inputs.shape)
-                    idx[axis] = slice(i * chunk, (i + 1) * chunk)
-                    slices.append(inputs[tuple(idx)])
-                return slices
+                size_splits = [chunk] * self.num_or_size_splits
             # Fallback for fully dynamic shapes
             return ops.split(inputs, self.num_or_size_splits, axis=self.axis)
-        return ops.split(inputs, self.num_or_size_splits, axis=self.axis)
+        else:
+            size_splits = self.num_or_size_splits
+
+        slices = []
+        start_idx = 0
+        for size in size_splits:
+            idx = [slice(None)] * len(inputs.shape)
+            idx[axis] = slice(start_idx, start_idx + size)
+            start_idx += size
+            slices.append(inputs[tuple(idx)])
+        return slices
 
     def get_config(self):
         config = super().get_config()
