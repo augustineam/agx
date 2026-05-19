@@ -6,13 +6,21 @@ At inference, anomalies are detected by measuring discrepancies between the enco
 
 ```mermaid
 flowchart LR
+    subgraph CondEncoder ["Condition Encoder"]
+        direction TB
+        CE["CompositeConditionEncoder
+        [machine_id, view_id, product_id]
+        → c: (B, 64)"]
+    end
+
     subgraph Encoder ["Encoder [E]"]
         direction TB
         B["Pretrained Backbone
         (frozen → thawed)"]
+        FE["FiLM(c) @ latent head"]
         H["Trainable Head
         (μ, log σ²)"]
-        B --> H
+        B --> FE --> H
     end
 
     subgraph Latent ["Latent Space"]
@@ -22,20 +30,25 @@ flowchart LR
 
     subgraph Decoder ["Decoder [D]"]
         direction TB
+        FD["FiLM(c) @ each stage"]
         D["MobileNetV3-style
         Inverted Residual Stages"]
+        FD --> D
     end
 
+    IDs["Condition IDs"] --> CondEncoder
+    CondEncoder -->|"c: (B, 64)"| FE & FD
+
     I["Image I"] --> Encoder
-    Encoder -->|"z_mean, z_log_var
-    + embeddings"| Latent
+    Encoder -->|"(μ, logσ²),
+    *embeddings"| Latent
     Latent -->|z| Decoder
     Decoder --> I'["Reconstruction I'"]
     I' -->|"Second pass"| Encoder
     Encoder -->|"embeddings'"| CMP["Compare
     embeddings vs embeddings'"]
 
-    N["Noise ~ N(0,1)"] -->|"z_noise"| Decoder
+    N["z_fake (interpolated)"] -->|"manifold lerp"| Decoder
     Decoder --> F["Fake Image"]
     F -->|"Encode fake"| Encoder
 ```
@@ -71,8 +84,8 @@ flowchart TD
 
 | Step | Graph | Trains | Purpose |
 | --- | --- | --- | --- |
-| **1. Collaborative** | `real → [E] → z → [D] → rec` | E + D | Joint ELBO maximization — establishes normal manifold |
-| **2. Fake path** | `noise → [D₁] → fake → [E_frozen] → z → [D₂] → rec_fake` | D only | Generation + cycle consistency — D₁ produces normal-looking images |
+| **1. Collaborative** | `real → [E] → z → [D] → rec` | E + D + Cond | Joint ELBO maximization — establishes normal manifold |
+| **2. Fake path** | `z_fake(interp) → [D₁] → fake → [E_frozen] → z → [D₂] → rec_fake` | D only | Generation + cycle consistency — D₁ produces normal-looking images |
 | **3. Rec path** | `z_real → [D₁] → rec → [E_frozen] → z_rec → [D₂] → rec_rec` | D only | Reconstruction + embed + cycle — D₁ matches original perceptually |
 | **4. Critic** | `fake → [E]`, `rec → [E]` | E only | KLD discrimination — E learns to reject decoder outputs |
 

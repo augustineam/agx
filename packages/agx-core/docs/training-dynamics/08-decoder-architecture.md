@@ -61,15 +61,21 @@ Design rationale:
 - **Decreasing dropout**: High dropout at coarse stages (force robustness), zero at final stage (preserve fine detail).
 - **Conservative expand ratios** (1.0–2.0): The decoder doesn't need the extreme expansion (6×) used in classification encoders. Generation benefits more from depth (more blocks) than width (higher expansion).
 
-### Conditioning: Concatenation vs FiLM
+### Conditioning: FiLM (Feature-wise Linear Modulation)
 
-The current implementation uses **concatenation at the bottleneck** — the conditioning tensor (a spatial feature map, not a vector) is concatenated with the latent code before entering decoder stages.
-
-For future multi-product training, **FiLM (Feature-wise Linear Modulation)** at every decoder stage would provide richer conditioning:
+The decoder uses **FiLM conditioning** at every stage — the conditioning vector modulates feature maps via per-channel affine transformation:
 
 $$\text{output} = \text{features} \cdot (1 + \gamma) + \beta$$
 
-where $\gamma, \beta$ are predicted from the conditioning signal. FiLM modulates behavior at every resolution without inflating channel dimensions. The current FiLM implementation uses `Conv2D → GlobalAveragePooling2D` to handle spatial conditioning tensors (rather than Dense layers for vector conditioning).
+where $\gamma, \beta \in \mathbb{R}^C$ are predicted from the conditioning vector $c \in \mathbb{R}^{64}$ via a 2-layer MLP projection. FiLM modulates behavior at every resolution without inflating channel dimensions.
+
+```
+z → stem → [FiLM(c) → Stage_0] → [FiLM(c) → Stage_1] → ... → to_rgb
+```
+
+Each FiLM layer has its own projection weights, allowing different modulation patterns at each resolution. Early stages modulate coarse structure (e.g., "this product is a can vs. a jar"), while later stages modulate fine texture (e.g., "this product has a textured label vs. smooth glass").
+
+The conditioning vector `c` comes from a `CompositeConditionEncoder` that maps categorical IDs (machine, view, product) to a fixed-size dense embedding. See [14-conditioning-architecture.md](./14-conditioning-architecture.md) for full details on the conditioning system.
 
 ### Progressive Training (Future)
 

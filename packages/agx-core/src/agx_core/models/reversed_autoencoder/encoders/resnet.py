@@ -94,7 +94,7 @@ class ResNetEncoder(BaseEncoder):
             shape[spatial_slice] = [h, w]
             features_shape.append(tuple(shape))
 
-        return (latent_shape, latent_shape), features_shape
+        return (latent_shape, latent_shape), *features_shape
 
     def call(
         self,
@@ -111,9 +111,9 @@ class ResNetEncoder(BaseEncoder):
 
         x = self.concat([x, c])
         x = self.conv(x)
-        mean, logvar = self.split(x)
+        mulogvar = self.split(x)
 
-        return (mean, logvar), embeddings
+        return mulogvar, *embeddings
 
     def get_config(self):
         config = super().get_config()

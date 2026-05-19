@@ -84,18 +84,21 @@ def kl_divergence(mean, logvar, cap=10.0):
 def embedding_loss(
     teacher_embedds: Sequence[KerasTensor],
     student_embedds: Sequence[KerasTensor],
+    stop_gradients: bool = True,
 ):
     """Feature consistency loss (MSE + Cosine Similarity) between two sets of embeddings."""
     total_loss = 0
     scale = 1.0 / len(teacher_embedds)
     for teacher_feature, student_feature in zip(teacher_embedds, student_embedds):
+        if stop_gradients:
+            teacher_feature = ops.stop_gradient(teacher_feature)
         mse = ops.mean(
-            ops.square(ops.stop_gradient(teacher_feature) - student_feature),
+            ops.square(teacher_feature - student_feature),
             axis=_channel_axis(),
         )
         # [B, H, W]
         cosine_similarity = losses.cosine_similarity(
-            ops.stop_gradient(teacher_feature), student_feature, axis=_channel_axis()
+            teacher_feature, student_feature, axis=_channel_axis()
         )
         total_loss += ops.mean(0.5 * mse + (1 + cosine_similarity), axis=[1, 2])
     return scale * total_loss

@@ -37,7 +37,7 @@ class FiLM(layers.Layer):
         ch_axis = _channel_axis()
 
         feature_dim = features_shape[ch_axis]
-        embed_dim = cond_shape[ch_axis]
+        embed_dim = cond_shape[-1]
 
         proj_reshape = list(features_shape)
         proj_reshape[ch_axis] = 2 * feature_dim
@@ -47,7 +47,7 @@ class FiLM(layers.Layer):
             layers.Dense(embed_dim, activation="relu"),
             layers.Dense(2 * feature_dim),
             layers.Reshape(tuple(proj_reshape[1:])),
-            Split(2),
+            Split(2, axis=ch_axis),
             name="film_projection",
         )
 

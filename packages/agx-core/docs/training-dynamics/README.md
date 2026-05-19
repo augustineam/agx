@@ -15,8 +15,10 @@ Documentation for the adversarial variational architecture designed for unsuperv
 9. [Callbacks](./09-callbacks.md) — Adversarial equilibrium callback, backbone thaw callback
 10. [Hyperparameters](./10-hyperparameters.md) — Parameter reference, tuning guidance
 11. [X-Ray Preprocessing](./11-xray-preprocessing.md) — Log transform, Beer-Lambert, spatial curriculum interaction
-12. [Data Augmentation](./12-data-augmentation.md) — Augmentation rationale for anomaly detection
+12. [Data Augmentation](./12-data-augmentation.md) — Physics-aware augmentation pipeline for X-ray anomaly detection
 13. [Design Decisions](./13-design-decisions.md) — Considered and rejected alternatives
+14. [Conditioning Architecture](./14-conditioning-architecture.md) — FiLM layers, CompositeConditionEncoder, transfer learning
+15. [Latent Interpolation](./15-latent-interpolation.md) — Fake path z-sampling strategies (manifold, perturbed, slerp)
 
 ## Deprecated Sections
 

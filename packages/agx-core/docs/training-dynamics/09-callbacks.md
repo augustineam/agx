@@ -20,11 +20,33 @@ Monitors an exponential moving average (EMA) of $\Delta_{\text{KLD}}$ and dynami
     ▼
 ```
 
+**Training phases:**
+
+```
+Step 0                      warmup_pause_steps         min_pause_steps controls
+│                           │                          subsequent pauses
+▼                           ▼                          ▼
+┌───────────────────────────┬──────────────────────────┐
+│  Warmup                   │  Normal (EMA-controlled) │
+│  Only Step 1 trains       │  All steps active        │
+│  E+D+Cond: collaborative  │  + adversarial           │
+└───────────────────────────┴──────────────────────────┘
+```
+
+**Warmup phase:** During warmup (`warmup_pause_steps`, default 500), only the collaborative step (Step 1) executes. Both `train_encoder_enabled` and `train_decoder_enabled` are set to `False`, disabling Steps 2/3/4. This allows:
+- The encoder to learn initial feature extraction and latent structure
+- The decoder to learn basic reconstruction
+- The condition encoder to learn meaningful embeddings
+
+All without adversarial pressure that would be meaningless on random decoder outputs.
+
 **Step 1 (collaborative VAE) always runs** — it is never adversarial and provides the stable reconstruction foundation regardless of equilibrium state.
 
 **Design principles:**
 
-- **Hysteresis via minimum pause duration**: Once a component is paused, it stays paused for at least $N$ steps, even if the EMA briefly re-enters the healthy zone. This prevents rapid oscillation where one step of recovery immediately triggers a resume, followed by an immediate re-breach.
+- **Warmup phase**: Pure collaborative training establishes a baseline before adversarial steps add pressure. Without warmup, the encoder critic would discriminate trivially bad decoder outputs, learning shortcuts that are hard to unlearn.
+
+- **Hysteresis via minimum pause duration**: Once a component is paused, it stays paused for at least $N$ steps (`min_pause_steps`), even if the EMA briefly re-enters the healthy zone. This prevents rapid oscillation where one step of recovery immediately triggers a resume, followed by an immediate re-breach.
 
 - **EMA smoothing**: Instantaneous $\Delta_{\text{KLD}}$ is noisy batch-to-batch. The EMA (default momentum $0.99 \approx$ 100-step window) filters transient spikes while remaining responsive to genuine regime shifts.
 

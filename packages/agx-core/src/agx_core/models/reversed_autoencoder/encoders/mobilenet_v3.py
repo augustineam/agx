@@ -9,6 +9,7 @@ from typing import Sequence, List, Optional
 from agx_core.models.reversed_autoencoder.base import BaseEncoder
 from agx_core.models.mobilenet_v3.layers import InvertedResidualBlock
 from agx_core.layers import Sequential, SoftClamp
+from agx_core.models.reversed_autoencoder.layers import FiLM
 from agx_core.helpers import _channel_axis, _spatial_slice
 
 
@@ -29,9 +30,10 @@ class _MobileNetV3SmallEncoderBase(BaseEncoder):
         self.logvar_min = logvar_min
         self.logvar_max = logvar_max
 
-    def _build_projection_head(self, x_shape, c_shape, ch_axis: int):
-        """Build to_latent_concat + to_mean + to_logvar."""
-        self.to_latent_concat = layers.Concatenate(axis=ch_axis)
+    def _build_projection_head(self, x_shape, c_shape):
+        """Build FiLM + to_mean + to_logvar."""
+
+        self.latent_film = FiLM(name="latent_film")
         self.to_mean = layers.Conv2D(self.latent_size, 1, use_bias=True, name="to_mean")
         self.to_logvar = Sequential(
             layers.Conv2D(
@@ -47,14 +49,14 @@ class _MobileNetV3SmallEncoderBase(BaseEncoder):
             name="to_logvar",
         )
 
-        self.to_latent_concat.build([x_shape, c_shape])
-        concat_shape = self.to_latent_concat.compute_output_shape([x_shape, c_shape])
-        self.to_mean.build(concat_shape)
-        self.to_logvar.build(concat_shape)
+        self.latent_film.build([x_shape, c_shape])
+        film_shape = self.latent_film.compute_output_shape([x_shape, c_shape])
+        self.to_mean.build(film_shape)
+        self.to_logvar.build(film_shape)
 
     def _project_latent(self, x, c, training=None):
-        h = self.to_latent_concat([x, c])
-        mean = self.to_mean(h)
+        h = self.latent_film([x, c], training=training)
+        mean = self.to_mean(h, training=training)
         logvar = self.to_logvar(h, training=training)
         return mean, logvar
 
@@ -151,15 +153,15 @@ class MobileNetV3SmallEncoder(_MobileNetV3SmallEncoderBase):
         # backbone outputs: [skip_0..skip_4, full_output] — projection head takes full_output
         x_shape = self.backbone.compute_output_shape(x_shape)[-1]
 
-        self._build_projection_head(x_shape, c_shape, ch_axis)
+        self._build_projection_head(x_shape, c_shape)
         super().build(input_shape)
 
     def call(self, inputs, training=None):
         x, c = inputs
         x = self.to_rgb(x, training=training)
         *features, x = self.backbone(x, training=training)
-        mean, logvar = self._project_latent(x, c, training=training)
-        return (mean, logvar), features
+        mu_logvar = self._project_latent(x, c, training=training)
+        return mu_logvar, *features
 
     def compute_output_shape(self, input_shape):
         x_shape, _ = input_shape
@@ -182,7 +184,7 @@ class MobileNetV3SmallEncoder(_MobileNetV3SmallEncoderBase):
             shape[_spatial_slice()] = [h, w]
             features_shape.append(tuple(shape))
 
-        return (latent_shape, latent_shape), features_shape
+        return (latent_shape, latent_shape), *features_shape
 
     def get_config(self):
         config = super().get_config()
@@ -387,7 +389,7 @@ class MobileNetV3SmallProgressiveEncoder(_MobileNetV3SmallEncoderBase):
         self.stages_head.build(cur_shape)
         head_shape = self.stages_head.compute_output_shape(cur_shape)
 
-        self._build_projection_head(head_shape, c_shape, ch_axis)
+        self._build_projection_head(head_shape, c_shape)
         super().build(input_shape)
 
     # ------------------------------------------------------------------
@@ -403,8 +405,8 @@ class MobileNetV3SmallProgressiveEncoder(_MobileNetV3SmallEncoderBase):
                 x = stage(x, training=training)
                 features.append(x)
             x = self.stages_head(features[-1], training=training)
-            mean, logvar = self._project_latent(x, c, training=training)
-            return (mean, logvar), features
+            mu_logvar = self._project_latent(x, c, training=training)
+            return mu_logvar, *features
 
         return self._call_progressive(inputs, training=training)
 
@@ -438,8 +440,8 @@ class MobileNetV3SmallProgressiveEncoder(_MobileNetV3SmallEncoderBase):
                 features.append(x)
 
         x = self.stages_head(x, training=training)
-        mean, logvar = self._project_latent(x, c, training=training)
-        return (mean, logvar), features
+        mu_logvar = self._project_latent(x, c, training=training)
+        return mu_logvar, *features
 
     # ------------------------------------------------------------------
     # Shape inference
@@ -467,7 +469,7 @@ class MobileNetV3SmallProgressiveEncoder(_MobileNetV3SmallEncoderBase):
                 shape[_spatial_slice()] = [h, w]
                 features_shape.append(tuple(shape))
 
-        return (latent_shape, latent_shape), features_shape
+        return (latent_shape, latent_shape), *features_shape
 
     # ------------------------------------------------------------------
     # Serialization

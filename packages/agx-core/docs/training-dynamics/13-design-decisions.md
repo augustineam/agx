@@ -20,6 +20,42 @@
 | ViT encoder                           | ❌          | Slower on CPU than MobileNet; no natural multi-scale features for spatial anomaly maps  |
 | Standard ConvTranspose upsampling     | ❌ Replaced | Checkerboard artifacts waste decoder capacity                                           |
 | Standard contrast (at grayscale mean) | ❌          | Operates at mean intensity; compresses the high-density band where FOs live             |
+| Concat conditioning at bottleneck     | ❌ Replaced | Channel count changes with vocab size; breaks transfer learning; no multi-resolution conditioning |
+| FiLM inside encoder backbone          | ❌          | Fights pretrained features; requires unfreezing to learn modulation; backbone should be product-agnostic |
+| Condition encoder trains from reconstruction loss | ❌ | Creates "cheat sheet" shortcuts; condition should learn from KLD only |
+| Slerp interpolation for fake path     | ❌          | Latent space is Gaussian (flat), not hypersphere; slerp ≈ lerp + numerical instability |
+| Perturbed noise for fake path         | ❌ Deprecated | Redundant with reparameterization trick; no manifold guarantee |
+| Pure noise `z ~ N(0,I)` for fake path | ❌          | Too far from manifold early in training; decoder wastes capacity on OOD inputs |
+| Shared embedding table across fields  | ❌          | Machine ID 2 ≠ View ID 2 ≠ Product ID 2; conflates semantically different categories |
+| Condition encoder in adversarial steps | ❌          | Adversarial signal corrupts embeddings; condition trains ONLY from collaborative KLD |
+| 3 optimizers (enc + dec + cond)       | ⚠️ Optional | Supported but default shares enc_optimizer with condition encoder (simpler, works well) |
+
+### Why FiLM Over Concatenation
+
+The original decoder used `Concatenate([z, c])` at the bottleneck. This was replaced with FiLM for multi-product training:
+
+1. **Fixed channel dimensions**: FiLM's `embed_dim=64` is constant regardless of number of products/views. Concat required `z_channels + cond_channels` — adding products changed conv input dimensions, requiring new weights.
+
+2. **Transfer learning**: Swapping the condition encoder (new products) requires zero changes to decoder conv weights with FiLM. With concat, every downstream convolution must be retrained.
+
+3. **Multi-resolution conditioning**: FiLM at every decoder stage provides condition-specific modulation at all spatial resolutions. Concat only conditions at the bottleneck — downstream stages have no direct condition access.
+
+4. **Edge deployment**: FiLM with a constant condition collapses to a fixed affine transform that can be fused into adjacent BatchNorm layers — zero runtime cost. Concat always requires the extra channels.
+
+### Why Manifold Interpolation (Not Noise) for Fake Path
+
+The fake path (Step 2) needs `z_fake` samples that are:
+- On or near the learned manifold (so the decoder can produce meaningful images)
+- Different from `z_real` (so the encoder gets novel discrimination targets)
+
+**Manifold interpolation** (`mode="manifold", manifold_op="roll"`) satisfies both: interpolating between two on-manifold points (both are encodings of real images) produces points that stay approximately on-manifold while being distinct from either endpoint.
+
+Alternatives fail because:
+- Pure noise is too far from the manifold early in training
+- Perturbed noise (z + ε) has no manifold guarantee and is redundant with reparameterization
+- Slerp assumes hypersphere geometry that doesn't match KLD-regularized Gaussian latents
+
+See [15-latent-interpolation.md](./15-latent-interpolation.md) for full analysis.
 
 ### Why MSE (Not SSIM) for `logpx_z`
 

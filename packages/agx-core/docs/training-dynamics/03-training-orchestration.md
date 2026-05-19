@@ -81,13 +81,14 @@ apply_encoder_gradients()
 
 ## Step 1: Collaborative VAE
 
-**Purpose:** Jointly train E + D to maximize ELBO on real data. Establishes the normal manifold.
+**Purpose:** Jointly train E + D + Condition Encoder to maximize ELBO on real data. Establishes the normal manifold.
 
 ```
-real → [E] → (μ, σ, embeds) → reparam → z → [D] → rec_real
+raw_cond → [CondEncoder] → c
+real → [E(c)] → (μ, σ, embeds) → reparam → z → [D(stop_grad(c))] → rec_real
 ```
 
-**Both E and D trained.** This is the only step where E and D cooperate.
+**E, D, and Condition Encoder all trained.** This is the only step where the condition encoder receives gradient.
 
 **Loss:**
 
@@ -98,6 +99,9 @@ where $\mathcal{L}_{\text{rec}}$ is the blended reconstruction loss (MSE + SSIM,
 **Gradient flow:**
 - **Encoder** receives: "map reals to low-KLD latent codes that preserve reconstructable information"
 - **Decoder** receives: "reconstruct faithfully from the codes the encoder produces"
+- **Condition Encoder** receives (via encoder path): "produce embeddings that help the encoder create well-structured latent codes for this product"
+
+**Conditioning gradient isolation:** `c` is stop-gradiented before entering the decoder. The condition encoder trains ONLY from the KLD signal through the encoder, not from reconstruction loss through the decoder. See [14-conditioning-architecture.md](./14-conditioning-architecture.md#why-stop_gradientc-before-decoder-in-all-steps) for rationale.
 
 **Outputs retained as constants (stop-gradiented) for later steps:**
 - `z_real` — reused in step 3
@@ -109,13 +113,15 @@ where $\mathcal{L}_{\text{rec}}$ is the blended reconstruction loss (MSE + SSIM,
 
 ## Step 2: Decoder Fools Encoder (Fake Path)
 
-**Purpose:** Train D to generate images from noise that the encoder considers normal AND that survive round-tripping.
+**Purpose:** Train D to generate images from interpolated latent codes that the encoder considers normal AND that survive round-tripping.
 
 ```
-noise → [D₁] → fake → [E_frozen_differentiable] → (μ, σ) → reparam → z_fake → [D₂] → rec_fake
+z_fake (manifold interp) → [D₁(c)] → fake → [E_frozen(c)] → (μ, σ) → reparam → z_fake → [D₂(c)] → rec_fake
 ```
 
-**Only D trained.** E is frozen (`trainable=False`) but the computation graph is stored through it — gradients flow back through E's forward pass into D₁.
+**Only D trained.** E and Condition Encoder are frozen. `c` is stop-gradiented.
+
+**z_fake generation:** Instead of pure noise, `z_fake` is produced by **manifold interpolation** — linear interpolation between `z_real` and a rolled batch neighbor. Both endpoints lie on the learned manifold, so interpolated points stay approximately on-manifold. See [15-latent-interpolation.md](./15-latent-interpolation.md) for full analysis of interpolation strategies.
 
 **Loss:**
 
@@ -236,9 +242,12 @@ The callback monitors `diff_kld` and can independently disable steps. `diff_kld`
 
 | Callback state | Step 1 | Steps 2/3 | Step 4 |
 |---|---|---|---|
-| **Train both** | ✅ E+D | ✅ D | ✅ E |
-| **Encoder paused** (diff_kld > upper) | ✅ E+D | ✅ D | ❌ Skip |
-| **Decoder paused** (diff_kld < lower) | ✅ E+D | ❌ Skip | ✅ E |
+| **Warmup** (initial phase) | ✅ E+D+Cond | ❌ Skip | ❌ Skip |
+| **Train both** | ✅ E+D+Cond | ✅ D | ✅ E |
+| **Encoder paused** (diff_kld > upper) | ✅ E+D+Cond | ✅ D | ❌ Skip |
+| **Decoder paused** (diff_kld < lower) | ✅ E+D+Cond | ❌ Skip | ✅ E |
+
+**Warmup phase:** Only the collaborative step (step 1) trains for the first `warmup_pause_steps` (default: 500). This allows the encoder, decoder, and condition encoder to establish a baseline normal manifold before adversarial training begins. Without warmup, the encoder's discrimination (step 4) would operate on random decoder outputs, potentially learning trivial rejection that's hard to unlearn.
 
 **Step 1 always runs** — the cooperative VAE objective is never adversarial and should never be paused. It maintains reconstruction quality regardless of adversarial balance.
 

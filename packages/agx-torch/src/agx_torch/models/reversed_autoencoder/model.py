@@ -8,6 +8,7 @@ import torch
 from typing import Dict, Any, Optional
 
 from agx_core.models.reversed_autoencoder import ReversedAutoencoderBase
+from agx_core.models.reversed_autoencoder.layers import CompositeConditionEncoder
 from agx_core.models.reversed_autoencoder.base import BaseEncoder, BaseDecoder
 from agx_torch.models.reversed_autoencoder.layers import Reparameterization
 
@@ -26,14 +27,12 @@ class ReversedAutoencoder(ReversedAutoencoderBase):
     orchestration is used.
     """
 
-    encoder: BaseEncoder
-    decoder: BaseDecoder
-
     def __init__(
         self,
         encoder: BaseEncoder,
         decoder: BaseDecoder,
         reparameterize=Reparameterization(),
+        condition: Optional[CompositeConditionEncoder] = None,
         beta_kld: float = 0.25,
         enc_expkld_temp: float = 1.0,
         dec_expelbo_temp: float = 1.0,
@@ -49,6 +48,7 @@ class ReversedAutoencoder(ReversedAutoencoderBase):
             encoder,
             decoder,
             reparameterize,
+            condition=condition,
             beta_kld=beta_kld,
             enc_expkld_temp=enc_expkld_temp,
             dec_expelbo_temp=dec_expelbo_temp,
@@ -61,15 +61,32 @@ class ReversedAutoencoder(ReversedAutoencoderBase):
             **kwargs,
         )
 
-    def _apply_encoder_gradients(self):
-        grads = [v.value.grad for v in self.encoder.trainable_weights]
+    def _apply_encoder_gradients(self, include_condition: bool = False):
+        train_vars = [v for v in self.encoder.trainable_weights]
+
+        if (
+            include_condition
+            and self.condition is not None
+            and self.cond_optimizer is None
+        ):
+            train_vars += [v for v in self.condition.trainable_weights]
+
+        grads = [v.value.grad for v in train_vars]
         with torch.no_grad():
-            self.enc_optimizer.apply(grads, self.encoder.trainable_weights)
+            self.enc_optimizer.apply(grads, train_vars)
 
     def _apply_decoder_gradients(self):
         grads = [v.value.grad for v in self.decoder.trainable_weights]
         with torch.no_grad():
             self.dec_optimizer.apply(grads, self.decoder.trainable_weights)
+
+    def _apply_condition_gradients(self):
+        if self.condition is None or self.cond_optimizer is None:
+            return
+
+        grads = [v.value.grad for v in self.condition.trainable_weights]
+        with torch.no_grad():
+            self.cond_optimizer.apply(grads, self.condition.trainable_weights)
 
     def train_step(self, data):
         (batch_real, batch_cond), _ = data
@@ -84,8 +101,9 @@ class ReversedAutoencoder(ReversedAutoencoderBase):
         torch.nn.Module.zero_grad(self)
         loss_1.backward()
 
-        self._apply_encoder_gradients()
+        self._apply_encoder_gradients(include_condition=True)
         self._apply_decoder_gradients()
+        self._apply_condition_gradients()
         self.update_step_metrics(metrics_1)
 
         if self.train_decoder_enabled:
@@ -124,7 +142,7 @@ class ReversedAutoencoder(ReversedAutoencoderBase):
             torch.nn.Module.zero_grad(self)
             loss_4.backward()
 
-            self._apply_encoder_gradients()
+            self._apply_encoder_gradients(include_condition=False)
         else:
             with torch.no_grad():
                 _, metrics_4 = self.train_encoder_critic(
@@ -157,10 +175,17 @@ class ReversedAutoencoder(ReversedAutoencoderBase):
         reparameterize = keras.saving.deserialize_keras_object(
             config.pop("reparameterize")
         )
+        cond_config = config.pop("condition")
+        condition = (
+            None
+            if cond_config is None
+            else keras.saving.deserialize_keras_object(cond_config)
+        )
 
         return cls(
             encoder,
             decoder,
             reparameterize,
+            condition,
             **config,
         )

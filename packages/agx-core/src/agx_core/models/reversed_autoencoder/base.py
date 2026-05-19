@@ -27,47 +27,17 @@ class BaseEncoder(keras.layers.Layer, ABC):
     def latent_spatial_res(self):
         return self._latent_spatial_res
 
-    def noise(self, batch_size) -> keras.KerasTensor:
-        if self.latent_spatial_res is None:
-            raise ValueError(
-                "Make sure to build the encoder or to set the correct latent spatial dimension"
-            )
-
-        if keras.config.image_data_format() == "channels_last":
-            return keras.random.normal(
-                (batch_size, *self.latent_spatial_res, self.latent_size)
-            )
-        return keras.random.normal(
-            (batch_size, self.latent_size, *self.latent_spatial_res)
-        )
-
-    def compute_output_shape(self, input_shape: Sequence[Sequence[int]]):
-        # Calculate the output shape by passing through all blocks
-        batch_size = input_shape[0][0]
-
-        if self.latent_spatial_res is None:
-            raise ValueError(
-                "Make sure to build the encoder or to set the correct latent spatial dimension"
-            )
-
-        if keras.config.image_data_format() == "channels_last":
-            mu_shape = (batch_size, *self.latent_spatial_res, self.latent_size)
-        else:
-            mu_shape = (batch_size, self.latent_size, *self.latent_spatial_res)
-
-        return mu_shape, mu_shape
-
     def training_enabled(self, training: bool):
         self.trainable = training
 
     @abstractmethod
     def call(
         self, inputs: Sequence[keras.KerasTensor], training: bool | None = None
-    ) -> Tuple[Tuple[keras.KerasTensor, keras.KerasTensor], List[keras.KerasTensor]]:
+    ) -> Tuple[Tuple[keras.KerasTensor], keras.KerasTensor]:
         """
         Contract:
         Inputs: [image, conditional]
-        Outputs: ((mean, logvar), embeddings)
+        Outputs: (mean, logvar), *embeddings
         """
         pass
 

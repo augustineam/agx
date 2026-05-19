@@ -1,10 +1,10 @@
 import keras
 
-from keras import metrics, Model, ops
+from keras import Model, metrics, ops, optimizers
 from typing import Sequence, Optional, Dict, Any
 
 from .base import BaseEncoder, BaseDecoder
-from .layers import Reparameterization
+from .layers import Reparameterization, CompositeConditionEncoder
 from .losses import *
 
 from agx_core.helpers import _channel_axis
@@ -21,16 +21,12 @@ class ReversedAutoencoderBase(Model):
     argument is needed because the training step computes losses internally.
     """
 
-    enc_optimizer: keras.optimizers.Optimizer
-    dec_optimizer: keras.optimizers.Optimizer
-    encoder: BaseEncoder
-    decoder: BaseDecoder
-
     def __init__(
         self,
         encoder: BaseEncoder,
         decoder: BaseDecoder,
         reparameterize=Reparameterization(),
+        condition: Optional[CompositeConditionEncoder] = None,
         beta_kld: float = 1.0,
         enc_expkld_temp: float = 1.0,
         dec_expelbo_temp: float = 1.0,
@@ -47,6 +43,8 @@ class ReversedAutoencoderBase(Model):
         self.encoder = encoder
         self.decoder = decoder
         self.reparameterize = reparameterize
+        self.condition = condition
+
         self.beta_kld = beta_kld
         self.enc_expkld_temp = enc_expkld_temp
         self.dec_expelbo_temp = dec_expelbo_temp
@@ -57,8 +55,8 @@ class ReversedAutoencoderBase(Model):
             z_fake_interp
             if z_fake_interp is not None
             else dict(
-                mode="manifold",  # | "manifold" | "slerp"
-                manifold_op="shuffle",  # | "shuffle"
+                mode="manifold",  # | "perturbed" | "slerp"
+                manifold_op="roll",  # | "shuffle"
                 perturbed_sigma=0.2,
             )
         )
@@ -75,8 +73,9 @@ class ReversedAutoencoderBase(Model):
         )
 
         # Two independent optimizers — set via compile()
-        self.optimizer: Optional[keras.optimizers.Optimizer] = None
-        self._dec_optimizer: Optional[keras.optimizers.Optimizer] = None
+        self.optimizer: Optional[keras.Optimizer] = None
+        self._dec_optimizer: Optional[keras.Optimizer] = None
+        self._cond_optimizer: Optional[keras.Optimizer] = None
 
         # Turn-taking flags — controlled by AdversarialEquilibriumCallback
         self.train_encoder_enabled = True
@@ -131,6 +130,14 @@ class ReversedAutoencoderBase(Model):
         ]
 
     @property
+    def enc_optimizer(self):
+        return self.optimizer
+
+    @enc_optimizer.setter
+    def enc_optimizer(self, optimizer: keras.Optimizer):
+        self.optimizer = optimizer
+
+    @property
     def dec_optimizer(self):
         return self._dec_optimizer
 
@@ -139,12 +146,12 @@ class ReversedAutoencoderBase(Model):
         self._dec_optimizer = optimizer
 
     @property
-    def enc_optimizer(self):
-        return self.optimizer
+    def cond_optimizer(self):
+        return self._cond_optimizer
 
-    @enc_optimizer.setter
-    def enc_optimizer(self, optimizer: keras.Optimizer):
-        self.optimizer = optimizer
+    @cond_optimizer.setter
+    def cond_optimizer(self, optimizer: Optional[keras.Optimizer]):
+        self._cond_optimizer = optimizer
 
     def build(self, input_shape: Sequence[Sequence[int]]):
         x_shape, c_shape = input_shape
@@ -153,13 +160,17 @@ class ReversedAutoencoderBase(Model):
         self._img_shape = tuple(x_shape)
         self._cond_shape = tuple(c_shape)
 
+        if self.condition:
+            self.condition.build(c_shape)
+            c_shape = self.condition.compute_output_shape(c_shape)
+
         self.encoder.build([x_shape, c_shape])
-        x_shape, _ = self.encoder.compute_output_shape([x_shape, c_shape])
+        latent_shape, *_ = self.encoder.compute_output_shape([x_shape, c_shape])
 
-        self._latent_shape = x_shape[0]
+        self._latent_shape = latent_shape[0]
 
-        self.reparameterize.build(x_shape)
-        x_shape = self.reparameterize.compute_output_shape(x_shape)
+        self.reparameterize.build(latent_shape)
+        x_shape = self.reparameterize.compute_output_shape(latent_shape)
 
         self.decoder.build([x_shape, c_shape])
         x_shape = self.decoder.compute_output_shape([x_shape, c_shape])
@@ -176,6 +187,20 @@ class ReversedAutoencoderBase(Model):
         )
 
         super().build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        x_shape, c_shape = input_shape
+
+        if self.condition:
+            c_shape = self.condition.compute_output_shape(c_shape)
+
+        latent_shape, *features_shape = self.encoder.compute_output_shape(
+            [x_shape, c_shape]
+        )
+        z_shape = self.reparameterize.compute_output_shape(latent_shape)
+        rec_shape = self.decoder.compute_output_shape([z_shape, c_shape])
+
+        return rec_shape, latent_shape, *features_shape
 
     def _build_ssim_kernel(self, filter_size, filter_sigma, num_channels):
         """Build and cache the SSIM Gaussian kernel (no gradients)."""
@@ -215,9 +240,13 @@ class ReversedAutoencoderBase(Model):
         self._img_shape = tuple(config["img_shape"])
         self._cond_shape = tuple(config["cond_shape"])
 
-        x_shape, _ = self.encoder.compute_output_shape(
-            [self._img_shape, self._cond_shape]
-        )
+        if self.condition:
+            self.condition.build(self._cond_shape)
+            c_shape = self.condition.compute_output_shape(self._cond_shape)
+        else:
+            c_shape = self._cond_shape
+
+        x_shape, _ = self.encoder.compute_output_shape([self._img_shape, c_shape])
         self._latent_shape = x_shape[0]
 
         ch_axis = _channel_axis()
@@ -252,14 +281,28 @@ class ReversedAutoencoderBase(Model):
         restore saved state into them.
         """
         if self.enc_optimizer is not None and not self.enc_optimizer.built:
-            self.enc_optimizer.build(self.encoder.variables)
+            # If condition encoder is set and condition optimizer wasn't provided, encoder optimizer will be used,
+            if self.condition is not None and self.cond_optimizer is None:
+                self.enc_optimizer.build(
+                    self.encoder.variables + self.condition.variables
+                )
+            else:
+                self.enc_optimizer.build(self.encoder.variables)
         if self.dec_optimizer is not None and not self.dec_optimizer.built:
             self.dec_optimizer.build(self.decoder.variables)
+
+        if (
+            self.condition is not None
+            and self.cond_optimizer is not None
+            and not self.cond_optimizer.built
+        ):
+            self.cond_optimizer.build(self.condition.variables)
 
     def compile(
         self,
         enc_optimizer: keras.Optimizer,
         dec_optimizer: keras.Optimizer,
+        cond_optimizer: Optional[keras.Optimizer] = None,
         **kwargs,
     ):
         """Compile the model with separate optimizers for encoder and decoder.
@@ -276,11 +319,12 @@ class ReversedAutoencoderBase(Model):
         # rmsprop optimizer that would be saved/loaded alongside our real ones.
         super().compile(optimizer=enc_optimizer, **kwargs)
         self.dec_optimizer = dec_optimizer
+        self.cond_optimizer = cond_optimizer
 
         if self.built:
             self._build_optimizers_if_needed()
 
-    def compile_from_config(self, config):
+    def compile_from_config(self, config: Dict[str, Any]):
         """Restore both optimizers from a serialized config produced by get_compile_config.
 
         Keras deserialization order (``serialization_lib.py``):
@@ -294,16 +338,26 @@ class ReversedAutoencoderBase(Model):
         eagerly here.  This ensures the optimizer slot counts match the
         saved state *before* step 4 tries to load them.
         """
-        enc_optimizer = keras.optimizers.deserialize(config["enc_optimizer"])
-        dec_optimizer = keras.optimizers.deserialize(config["dec_optimizer"])
-        self.compile(enc_optimizer, dec_optimizer)
+        enc_optimizer = optimizers.deserialize(config["enc_optimizer"])
+        dec_optimizer = optimizers.deserialize(config["dec_optimizer"])
+        cond_optimizer = config.get("cond_optimizer")
+        cond_optimizer = (
+            None if cond_optimizer is None else optimizers.deserialize(cond_optimizer)
+        )
+
+        self.compile(enc_optimizer, dec_optimizer, cond_optimizer)
         self._build_optimizers_if_needed()
 
     def get_compile_config(self):
         """Serialize the optimizer pair so that compile_from_config can restore them."""
         return {
-            "enc_optimizer": keras.optimizers.serialize(self.enc_optimizer),
-            "dec_optimizer": keras.optimizers.serialize(self.dec_optimizer),
+            "enc_optimizer": optimizers.serialize(self.enc_optimizer),
+            "dec_optimizer": optimizers.serialize(self.dec_optimizer),
+            "cond_optimizer": (
+                optimizers.serialize(self.cond_optimizer)
+                if self.cond_optimizer
+                else None
+            ),
         }
 
     def reconstruction_loss(
@@ -348,9 +402,16 @@ class ReversedAutoencoderBase(Model):
         x, c = inputs
         x = self.resize_progressive_output(x)
 
-        latent_params, _ = self.encoder([x, c], training=training)
-        z = self.reparameterize(latent_params)
-        return self.decoder([z, c], training=training)
+        if self.condition:
+            c = self.condition(c, training=training)
+
+        mulogvar, *features = self.encoder([x, c], training=training)
+        z = self.reparameterize(mulogvar)
+        return (
+            self.decoder([z, ops.stop_gradient(c)], training=training),
+            mulogvar,
+            *features,
+        )
 
     def resize_progressive_output(self, image: keras.KerasTensor):
         from .decoders.mobilenet_v3 import MobileNetV3SmallProgressiveDecoder
@@ -365,20 +426,24 @@ class ReversedAutoencoderBase(Model):
         self,
         real: keras.KerasTensor,
         cond: keras.KerasTensor,
-        training: Optional[bool] = None,
+        training: bool = True,
     ):
-        self.encoder.training_enabled(training or True)
-        self.decoder.training_enabled(training or True)
+        self.encoder.training_enabled(training)
+        self.decoder.training_enabled(training)
 
-        (mean, logvar), embeds = self.encoder([real, cond], training=training)
-        z = self.reparameterize([mean, logvar])
-        rec = self.decoder([z, cond], training=training)
+        if self.condition:
+            self.condition.trainable = training or True
+            cond = self.condition(cond, training=training)
+
+        mu_logvar, *embeds = self.encoder([real, cond], training=training)
+        z = self.reparameterize(mu_logvar)
+        rec = self.decoder([z, ops.stop_gradient(cond)], training=training)
 
         loss_rec = ops.mean(
             self.reconstruction_loss(real, rec),
             axis=[1, 2],
         )
-        kld = ops.mean(kl_divergence(mean, logvar), axis=[1, 2])
+        kld = ops.mean(kl_divergence(*mu_logvar), axis=[1, 2])
         elbo_real = -loss_rec - self.beta_kld * kld
 
         loss = -ops.mean(elbo_real)
@@ -395,24 +460,28 @@ class ReversedAutoencoderBase(Model):
         self,
         z_real: keras.KerasTensor,
         cond: keras.KerasTensor,
-        training: Optional[bool] = None,
+        training: bool = True,
     ):
         self.encoder.training_enabled(False)
-        self.decoder.training_enabled(training or True)
+        self.decoder.training_enabled(training)
+
+        if self.condition:
+            self.condition.trainable = False
+            cond = ops.stop_gradient(self.condition(cond, training=False))
 
         z_fake = self.sample_z_fake(z_real)
 
         fake = self.decoder([z_fake, cond], training=training)
 
-        (mean, logvar), _ = self.encoder([fake, cond], training=False)
-        z = self.reparameterize([mean, logvar])
+        mu_logvar, *_ = self.encoder([fake, cond], training=False)
+        z = self.reparameterize(mu_logvar)
         rec = self.decoder([z, cond], training=training)
 
         logpx_z = -ops.mean(
             self.reconstruction_loss(ops.stop_gradient(fake), rec),
             axis=[1, 2],
         )
-        kld = ops.mean(kl_divergence(mean, logvar), axis=[1, 2])
+        kld = ops.mean(kl_divergence(*mu_logvar), axis=[1, 2])
         elbo = logpx_z - self.beta_kld * kld
 
         expelbo = ops.exp(-self.dec_expelbo_temp * elbo)
@@ -430,22 +499,26 @@ class ReversedAutoencoderBase(Model):
         z_real: keras.KerasTensor,
         embeds_real: keras.KerasTensor,
         cond: keras.KerasTensor,
-        training: Optional[bool] = None,
+        training: bool = True,
     ):
         self.encoder.training_enabled(False)
-        self.decoder.training_enabled(training or True)
+        self.decoder.training_enabled(training)
+
+        if self.condition:
+            self.condition.trainable = False
+            cond = ops.stop_gradient(self.condition(cond, training=False))
 
         rec = self.decoder([z_real, cond], training=training)
 
-        (mean, logvar), embeds_rec = self.encoder([rec, cond], training=False)
-        z_rec = self.reparameterize([mean, logvar])
+        mu_logvar, *embeds_rec = self.encoder([rec, cond], training=False)
+        z_rec = self.reparameterize(mu_logvar)
         rec_rec = self.decoder([z_rec, cond], training=training)
 
         logpx_z = -ops.mean(
             self.reconstruction_loss(ops.stop_gradient(rec), rec_rec),
             axis=[1, 2],
         )
-        kld = ops.mean(kl_divergence(mean, logvar), axis=[1, 2])
+        kld = ops.mean(kl_divergence(*mu_logvar), axis=[1, 2])
         elbo = logpx_z - self.beta_kld * kld
 
         embed_loss = embedding_loss(embeds_real, embeds_rec)
@@ -466,16 +539,20 @@ class ReversedAutoencoderBase(Model):
         fake: keras.KerasTensor,
         rec: keras.KerasTensor,
         cond: keras.KerasTensor,
-        training: Optional[bool] = None,
+        training: bool = True,
     ):
-        self.encoder.training_enabled(training or True)
+        self.encoder.training_enabled(training)
         self.decoder.training_enabled(False)
 
-        (mean_fake, logvar_fake), _ = self.encoder([fake, cond], training=training)
-        (mean_rec, logvar_rec), _ = self.encoder([rec, cond], training=training)
+        if self.condition:
+            self.condition.trainable = False
+            cond = ops.stop_gradient(self.condition(cond, training=False))
 
-        kld_fake = ops.mean(kl_divergence(mean_fake, logvar_fake), axis=[1, 2])
-        kld_rec = ops.mean(kl_divergence(mean_rec, logvar_rec), axis=[1, 2])
+        mu_logvar_fake, *_ = self.encoder([fake, cond], training=training)
+        mu_logvar_rec, *_ = self.encoder([rec, cond], training=training)
+
+        kld_fake = ops.mean(kl_divergence(*mu_logvar_fake), axis=[1, 2])
+        kld_rec = ops.mean(kl_divergence(*mu_logvar_rec), axis=[1, 2])
 
         expkld_fake = ops.exp(-self.enc_expkld_temp * kld_fake)
         expkld_rec = ops.exp(-self.enc_expkld_temp * kld_rec)
@@ -579,6 +656,11 @@ class ReversedAutoencoderBase(Model):
                 encoder=keras.saving.serialize_keras_object(self.encoder),
                 decoder=keras.saving.serialize_keras_object(self.decoder),
                 reparameterize=keras.saving.serialize_keras_object(self.reparameterize),
+                condition=(
+                    None
+                    if self.condition is None
+                    else keras.saving.serialize_keras_object(self.condition)
+                ),
                 beta_kld=self.beta_kld,
                 enc_expkld_temp=self.enc_expkld_temp,
                 dec_expelbo_temp=self.dec_expelbo_temp,

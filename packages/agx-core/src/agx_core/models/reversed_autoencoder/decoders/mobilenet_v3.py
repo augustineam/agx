@@ -8,6 +8,7 @@ from typing import Sequence, List
 from agx_core.helpers import _channel_axis, _spatial_slice
 from agx_core.models.mobilenet_v3 import InvertedResidualBlock
 from agx_core.models.reversed_autoencoder.base import BaseDecoder
+from agx_core.models.reversed_autoencoder.layers import FiLM
 from agx_core.models.mobilenet_v3.layers import ResidualBlock
 from agx_core.layers import Sequential, Upsample2x
 
@@ -25,9 +26,8 @@ class _MobileNetV3SmallDecoderBase(BaseDecoder):
         super().__init__(target_shape=target_shape, name=name, **kwargs)
         self.rgb_activation = rgb_activation
 
-    def _build_stem(self, x_shape, c_shape, ch_axis: int):
+    def _build_stem(self, x_shape, ch_axis: int):
         """Build concat + stem; returns shape after stem."""
-        self.concat = layers.Concatenate(ch_axis)
         self.stem = Sequential(
             layers.Conv2D(576, 1, padding="same", use_bias=False),
             layers.BatchNormalization(ch_axis, epsilon=1e-3, momentum=0.999),
@@ -35,10 +35,12 @@ class _MobileNetV3SmallDecoderBase(BaseDecoder):
             layers.SpatialDropout2D(0.3),
             name="stem",
         )
-        self.concat.build([x_shape, c_shape])
-        x_shape = self.concat.compute_output_shape([x_shape, c_shape])
         self.stem.build(x_shape)
         return self.stem.compute_output_shape(x_shape)
+
+    def _build_film_layers(self, num_stages: int):
+        """Build one FiLM layer per stage."""
+        return [FiLM(name=f"film_{i}") for i in range(num_stages)]
 
     def _build_stages(self, ch_axis: int) -> List[layers.Layer]:
         return [
@@ -130,9 +132,10 @@ class MobileNetV3SmallDecoder(_MobileNetV3SmallDecoderBase):
         ch_axis = _channel_axis()
         out_ch = self.target_shape[ch_axis]
 
-        x_shape = self._build_stem(x_shape, c_shape, ch_axis)
+        x_shape = self._build_stem(x_shape, ch_axis)
 
         self.stages: List[layers.Layer] = self._build_stages(ch_axis)
+        self.film: List[FiLM] = self._build_film_layers(len(self.stages))
 
         self.to_rgb = Sequential(
             layers.Conv2D(out_ch, 1, padding="same", use_bias=True),
@@ -140,7 +143,8 @@ class MobileNetV3SmallDecoder(_MobileNetV3SmallDecoderBase):
             name="to_rgb",
         )
 
-        for stage in self.stages:
+        for film, stage in zip(self.film, self.stages):
+            film.build([x_shape, c_shape])
             stage.build(x_shape)
             x_shape = stage.compute_output_shape(x_shape)
 
@@ -148,8 +152,7 @@ class MobileNetV3SmallDecoder(_MobileNetV3SmallDecoderBase):
         super().build(input_shape)
 
     def compute_output_shape(self, input_shape):
-        x_shape, c_shape = input_shape
-        x_shape = self.concat.compute_output_shape([x_shape, c_shape])
+        x_shape, _ = input_shape
         x_shape = self.stem.compute_output_shape(x_shape)
         for stage in self.stages:
             x_shape = stage.compute_output_shape(x_shape)
@@ -157,9 +160,9 @@ class MobileNetV3SmallDecoder(_MobileNetV3SmallDecoderBase):
 
     def call(self, inputs, training=None):
         x, cond = inputs
-        x = self.concat([x, cond])
         x = self.stem(x, training=training)
-        for stage in self.stages:
+        for film, stage in zip(self.film, self.stages):
+            x = film([x, cond], training=training)
             x = stage(x, training=training)
         return self.to_rgb(x, training=training)
 
@@ -248,12 +251,15 @@ class MobileNetV3SmallProgressiveDecoder(_MobileNetV3SmallDecoderBase):
 
         if training:
             # Freeze stages not yet grown
-            for stage in self.stages[curr + 1 :]:
-                stage.trainable = False
+            for idx in range(curr + 1, len(self.stages)):
+                self.film[idx].trainable = False
+                self.stages[idx].trainable = False
+
             # During fade-in freeze earlier stages to prevent destabilization
             if self._alpha < 1.0:
-                for stage in self.stages[:curr]:
-                    stage.trainable = False
+                for idx in range(curr):
+                    self.film[idx].trainable = False
+                    self.stages[idx].trainable = False
 
     # ------------------------------------------------------------------
     # Build
@@ -265,9 +271,10 @@ class MobileNetV3SmallProgressiveDecoder(_MobileNetV3SmallDecoderBase):
         ch_axis = _channel_axis()
         out_ch = self.target_shape[ch_axis]
 
-        x_shape = self._build_stem(x_shape, c_shape, ch_axis)
+        x_shape = self._build_stem(x_shape, ch_axis)
 
         self.stages: List[layers.Layer] = self._build_stages(ch_axis)
+        self.film: List[FiLM] = self._build_film_layers(len(self.stages))
 
         self.to_rgb: List[layers.Layer] = [
             Sequential(
@@ -291,7 +298,8 @@ class MobileNetV3SmallProgressiveDecoder(_MobileNetV3SmallDecoderBase):
             size=2, interpolation="bilinear", name="fade_upsampling"
         )
 
-        for idx, stage in enumerate(self.stages):
+        for idx, (film, stage) in enumerate(zip(self.film, self.stages)):
+            film.build([x_shape, c_shape])
             stage.build(x_shape)
             x_shape = stage.compute_output_shape(x_shape)
             self.to_rgb[idx].build(x_shape)
@@ -304,24 +312,27 @@ class MobileNetV3SmallProgressiveDecoder(_MobileNetV3SmallDecoderBase):
 
     def call(self, inputs, training=None):
         x, cond = inputs
-        x = self.concat([x, cond])
         x = self.stem(x, training=training)
 
         if self.is_fully_grown:
-            for stage in self.stages:
+            for film, stage in zip(self.film, self.stages):
+                x = film([x, cond], training=training)
                 x = stage(x, training=training)
             return self.to_rgb[-1](x, training=training)
 
-        return self._call_progressive(x, training=training)
+        return self._call_progressive([x, cond], training=training)
 
-    def _call_progressive(self, x, training=None):
+    def _call_progressive(self, inputs, training=None):
+        x, cond = inputs
         cur = self._current_stage
         alpha = self._alpha
 
         for i in range(cur):
+            x = self.film[i]([x, cond], training=training)
             x = self.stages[i](x, training=training)
 
         if alpha >= 1.0 or cur == 0:
+            x = self.film[cur]([x, cond], training=training)
             x = self.stages[cur](x, training=training)
             return self.to_rgb[cur](x, training=training)
 
@@ -329,6 +340,8 @@ class MobileNetV3SmallProgressiveDecoder(_MobileNetV3SmallDecoderBase):
         old_rgb = self._fade_upsample(
             self.to_rgb[cur - 1](ops.stop_gradient(x), training=False)
         )
+
+        x = self.film[cur]([x, cond], training=training)
         x = self.stages[cur](x, training=training)
         new_rgb = self.to_rgb[cur](x, training=training)
 
@@ -339,8 +352,7 @@ class MobileNetV3SmallProgressiveDecoder(_MobileNetV3SmallDecoderBase):
     # ------------------------------------------------------------------
 
     def compute_output_shape(self, input_shape):
-        x_shape, c_shape = input_shape
-        x_shape = self.concat.compute_output_shape([x_shape, c_shape])
+        x_shape, _ = input_shape
         x_shape = self.stem.compute_output_shape(x_shape)
         for i in range(self._current_stage + 1):
             x_shape = self.stages[i].compute_output_shape(x_shape)

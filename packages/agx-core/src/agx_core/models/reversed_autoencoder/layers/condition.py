@@ -52,7 +52,6 @@ class CompositeConditionEncoder(layers.Layer):
     def build(self, input_shape):
         batch_dim, ch_dim = input_shape
 
-        ch_axis = _channel_axis()
         self.num_categorical = len(self.vocab_sizes)
         self.num_continuous = ch_dim - self.num_categorical
 
@@ -68,7 +67,7 @@ class CompositeConditionEncoder(layers.Layer):
         if self.num_continuous > 0:
             size_splits += [self.num_continuous]
 
-        self.split = Split(size_splits, axis=ch_axis)
+        self.split = Split(size_splits)
         self.split.build(input_shape)
 
         num_fields_total = len(size_splits)

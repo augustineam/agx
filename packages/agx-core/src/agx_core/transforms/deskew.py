@@ -12,10 +12,13 @@ we use a geometrically principled 4-point perspective correction:
 
 1. Threshold the image to obtain a binary mask of the object.
 2. Find the largest external contour.
-3. Approximate the contour to a quadrilateral (``approxPolyDP``).
-4. Compute ``minAreaRect`` on the contour to get the ideal (unsheared,
+3. **Guard:** Check rectangularity and aspect ratio. Non-rectangular objects
+   (circles, ellipses, irregular shapes) are returned unchanged — deskew
+   only makes sense for objects that *should be* rectangular.
+4. Approximate the contour to a quadrilateral (``approxPolyDP``).
+5. Compute ``minAreaRect`` on the contour to get the ideal (unsheared,
    unrotated) rectangle.
-5. Build a perspective warp that maps the detected quad corners → the
+6. Build a perspective warp that maps the detected quad corners → the
    ``minAreaRect`` corners, correcting **both** skew and shear in a single
    ``warpPerspective`` call.
 
@@ -130,6 +133,49 @@ def _find_object_quad(
     return None, largest, min_rect
 
 
+def _is_rectangular(
+    contour: np.ndarray,
+    min_rect: tuple,
+    rectangularity_threshold: float = 0.85,
+    min_aspect_ratio: float = 1.2,
+) -> tuple[bool, str]:
+    """Determine if the detected object is rectangular enough to deskew.
+
+    Uses two criteria:
+
+    1. **Rectangularity** = ContourArea / minAreaRect_Area.
+       Perfect rectangle ≈ 1.0, ellipse/circle ≈ π/4 ≈ 0.785.
+       Only objects above the threshold are considered rectangular.
+
+    2. **Aspect ratio** = long_side / short_side of the minAreaRect.
+       Near-square objects (AR < threshold) have ambiguous orientation
+       and should not be rotated — the minAreaRect angle is unreliable.
+
+    Returns
+    -------
+    is_rect : bool
+        Whether the object should be corrected.
+    skip_reason : str
+        Empty if ``is_rect`` is True; otherwise a short diagnostic string.
+    """
+    contour_area = cv2.contourArea(contour)
+    (_, _), (rect_w, rect_h), _ = min_rect
+    rect_area = rect_w * rect_h
+
+    if rect_area == 0:
+        return False, "zero_area"
+
+    rectangularity = contour_area / rect_area
+    if rectangularity < rectangularity_threshold:
+        return False, f"not_rectangular (rect={rectangularity:.3f})"
+
+    aspect_ratio = max(rect_w, rect_h) / (min(rect_w, rect_h) + 1e-6)
+    if aspect_ratio < min_aspect_ratio:
+        return False, f"ambiguous_orientation (AR={aspect_ratio:.2f})"
+
+    return True, ""
+
+
 def _background_value(img: np.ndarray, mask: np.ndarray) -> int:
     """Median intensity of background pixels (where mask == 0)."""
     bg = img[mask == 0]
@@ -152,10 +198,16 @@ def compute_deskew_perspective(
     morph_ksize: int = 5,
     min_area_frac: float = 0.01,
     approx_eps_frac: float = 0.02,
+    rectangularity_threshold: float = 0.85,
+    min_aspect_ratio: float = 1.2,
     border_value: Optional[int] = None,
 ) -> tuple[np.ndarray, dict]:
     """
     Detect and correct skew **and** shear on a single grayscale X-ray image.
+
+    Only applies correction to objects that are sufficiently rectangular
+    (rectangularity > threshold) and elongated (aspect ratio > threshold).
+    Circular, elliptical, and near-square objects are returned unchanged.
 
     Parameters
     ----------
@@ -173,6 +225,14 @@ def compute_deskew_perspective(
         Reject contours smaller than this fraction of the image area.
     approx_eps_frac : float
         Initial ``approxPolyDP`` epsilon as a fraction of arc-length.
+    rectangularity_threshold : float
+        Minimum ContourArea/minAreaRect_Area ratio to consider an object
+        rectangular. Below this the object is assumed curved (circle,
+        ellipse, etc.) and returned unchanged. Default 0.85.
+    min_aspect_ratio : float
+        Minimum long_side/short_side ratio of the minAreaRect. Objects
+        below this are near-square with ambiguous orientation and are
+        returned unchanged. Default 1.2.
     border_value : int or None
         Fill value for new pixels; ``None`` → auto from background.
 
@@ -182,7 +242,8 @@ def compute_deskew_perspective(
         Corrected image (same dtype as input).
     info : dict
         Diagnostic dict with keys ``angle_deg``, ``method``
-        (``"perspective"`` | ``"rotation"`` | ``"none"``), and ``quad``.
+        (``"perspective"`` | ``"rotation"`` | ``"none"`` | ``"skip_*"``),
+        and ``quad``.
     """
     # --- binarise ---------------------------------------------------------
     u8 = _to_uint8(img)
@@ -210,6 +271,19 @@ def compute_deskew_perspective(
     if min_rect is None:
         logger.info("No object found — returning image unchanged")
         return img.copy(), {"angle_deg": 0.0, "method": "none", "quad": None}
+
+    # --- shape guard: only correct rectangular, elongated objects ----------
+    if contour is not None:
+        is_rect, skip_reason = _is_rectangular(
+            contour, min_rect, rectangularity_threshold, min_aspect_ratio
+        )
+        if not is_rect:
+            logger.debug("Skipping deskew: %s", skip_reason)
+            return img.copy(), {
+                "angle_deg": 0.0,
+                "method": f"skip_{skip_reason}",
+                "quad": None,
+            }
 
     fill = border_value if border_value is not None else _background_value(img, mask)
     (_, _), (rect_w, rect_h), angle = min_rect
@@ -305,6 +379,10 @@ class Deskew(ImageOnlyTransform):
     images, correcting both rotation (skew) and parallelogram distortion
     (shear) in a single perspective warp.
 
+    Includes a shape guard that skips correction for non-rectangular objects
+    (circles, ellipses, near-square shapes) where deskew is meaningless or
+    harmful.
+
     Parameters
     ----------
     threshold_method : ``"otsu"`` | ``"fixed"``
@@ -313,6 +391,12 @@ class Deskew(ImageOnlyTransform):
     morph_ksize : int
     min_area_frac : float
     approx_eps_frac : float
+    rectangularity_threshold : float
+        Minimum ContourArea/minAreaRect_Area to consider the object
+        rectangular. Default 0.85. Ellipses/circles score ~0.785.
+    min_aspect_ratio : float
+        Minimum long/short side ratio. Near-square objects have ambiguous
+        orientation and are skipped. Default 1.2.
     border_value : int or None
     p : float
         Probability of applying the transform (default ``1.0`` — this is a
@@ -334,6 +418,8 @@ class Deskew(ImageOnlyTransform):
         morph_ksize: int = 5,
         min_area_frac: float = 0.01,
         approx_eps_frac: float = 0.02,
+        rectangularity_threshold: float = 0.85,
+        min_aspect_ratio: float = 1.2,
         border_value: Optional[int] = None,
         p: float = 1.0,
     ):
@@ -344,6 +430,8 @@ class Deskew(ImageOnlyTransform):
         self.morph_ksize = morph_ksize
         self.min_area_frac = min_area_frac
         self.approx_eps_frac = approx_eps_frac
+        self.rectangularity_threshold = rectangularity_threshold
+        self.min_aspect_ratio = min_aspect_ratio
         self.border_value = border_value
 
     def apply(self, img: np.ndarray, **params) -> np.ndarray:
@@ -355,6 +443,8 @@ class Deskew(ImageOnlyTransform):
             morph_ksize=self.morph_ksize,
             min_area_frac=self.min_area_frac,
             approx_eps_frac=self.approx_eps_frac,
+            rectangularity_threshold=self.rectangularity_threshold,
+            min_aspect_ratio=self.min_aspect_ratio,
             border_value=self.border_value,
         )
         return corrected
@@ -367,6 +457,8 @@ class Deskew(ImageOnlyTransform):
             "morph_ksize",
             "min_area_frac",
             "approx_eps_frac",
+            "rectangularity_threshold",
+            "min_aspect_ratio",
             "border_value",
         )
 

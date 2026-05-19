@@ -19,8 +19,25 @@
 | `upper_threshold`     | 2.0     | 1.0–5.0    | diff_kld above which encoder (step 4) is paused                      |
 | `lower_threshold`     | -0.5    | -2.0–0.0   | diff_kld below which decoder (steps 2/3) is paused                   |
 | `ema_momentum`        | 0.99    | 0.95–0.999 | EMA smoothing for equilibrium callback                               |
-| `min_pause_steps`     | 50      | 20–200     | Minimum steps a component stays paused                               |
+| `min_pause_steps`     | 50      | 20–200     | Minimum steps a component stays paused after warmup                  |
+| `warmup_pause_steps`  | 500     | 200–1000   | Steps in warmup phase (only collaborative step trains)               |
 | `backbone_lr_factor`  | 0.01    | 0.001–0.1  | Backbone LR relative to head after thawing                           |
+
+## Conditioning Hyperparameters
+
+| Parameter             | Default | Constraint    | Effect                                                            |
+| --------------------- | ------- | ------------- | ----------------------------------------------------------------- |
+| `embed_dim`           | 64      | **Never change** | API contract between condition encoder and FiLM layers. Changing this invalidates all trained weights. |
+| `vocab_sizes`         | varies  | Must match data | List of vocabulary sizes: `[num_machines, num_views, num_products]` |
+| `field_embed_dim`     | None    | Optional      | Override per-field embedding size. Auto: `max(8, embed_dim // num_fields)` |
+
+## Latent Interpolation Hyperparameters
+
+| Parameter             | Default      | Options                | Effect                                                     |
+| --------------------- | ------------ | ---------------------- | ---------------------------------------------------------- |
+| `z_fake_interp.mode`  | `"manifold"` | `manifold`, `perturbed`, `slerp` | Interpolation strategy for fake path z sampling |
+| `z_fake_interp.manifold_op` | `"roll"` | `roll`, `shuffle`     | How to select the second interpolation endpoint            |
+| `z_fake_interp.perturbed_sigma` | `0.2` | 0.05–0.5         | Noise scale (only if mode=perturbed)                       |
 
 ## Curriculum Parameter Interactions
 

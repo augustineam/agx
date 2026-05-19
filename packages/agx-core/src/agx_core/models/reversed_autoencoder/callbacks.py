@@ -52,6 +52,7 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
         diff_kld_rec_weight: float = 0.7,
         ema_momentum: float = 0.99,
         min_pause_steps: int = 50,
+        warmup_pause_steps: int = 500,
         verbose: bool = True,
     ):
         super().__init__()
@@ -60,6 +61,7 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
         self.diff_kld_rec_weight = diff_kld_rec_weight
         self.ema_momentum = ema_momentum
         self.min_pause_steps = min_pause_steps
+        self.warmup_pause_steps = warmup_pause_steps
         self.verbose = verbose
 
         # State
@@ -71,8 +73,9 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
         self._ema = None
         self._steps_paused = 0
         self._state = "warmup"
-        self.model.train_encoder_enabled = True
-        self.model.train_decoder_enabled = True
+        # Only collaborative step is trained
+        self.model.train_encoder_enabled = False
+        self.model.train_decoder_enabled = False
 
     def on_train_batch_end(self, batch, logs=None):
         logs = logs or {}
@@ -146,7 +149,7 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
                 self.model.train_encoder_enabled = True
                 self.model.train_decoder_enabled = True
         elif self._state == "warmup":
-            if self._steps_paused >= self.min_pause_steps:
+            if self._steps_paused >= self.warmup_pause_steps:
                 self._state = "both"
 
         if self.verbose and self._state != prev_state:
@@ -161,6 +164,7 @@ class AdversarialEquilibriumCallback(keras.callbacks.Callback):
             lower_threshold=self.lower_threshold,
             ema_momentum=self.ema_momentum,
             min_pause_steps=self.min_pause_steps,
+            warmup_pause_steps=self.warmup_pause_steps,
             verbose=self.verbose,
         )
 
@@ -335,7 +339,9 @@ class ProgressiveGrowingCallback(keras.callbacks.Callback):
         model = self.model
         if isinstance(model, MobileNetV3SmallProgressiveDecoder):
             return model
-        if hasattr(model, "decoder") and isinstance(model.decoder, MobileNetV3SmallProgressiveDecoder):
+        if hasattr(model, "decoder") and isinstance(
+            model.decoder, MobileNetV3SmallProgressiveDecoder
+        ):
             return model.decoder
         raise TypeError(
             f"ProgressiveGrowingCallback requires a MobileNetV3SmallProgressiveDecoder, "
@@ -349,7 +355,9 @@ class ProgressiveGrowingCallback(keras.callbacks.Callback):
         model = self.model
         if isinstance(model, MobileNetV3SmallProgressiveEncoder):
             return model
-        if hasattr(model, "encoder") and isinstance(model.encoder, MobileNetV3SmallProgressiveEncoder):
+        if hasattr(model, "encoder") and isinstance(
+            model.encoder, MobileNetV3SmallProgressiveEncoder
+        ):
             return model.encoder
         raise TypeError(
             f"ProgressiveGrowingCallback requires a MobileNetV3SmallProgressiveEncoder, "
